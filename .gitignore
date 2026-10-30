@@ -1,0 +1,13 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs and runtime state
+*.log
+subscreen.pid
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
