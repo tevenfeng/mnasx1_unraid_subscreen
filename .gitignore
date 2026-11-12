@@ -11,3 +11,6 @@ subscreen.pid
 .vscode/
 .idea/
 .DS_Store
+
+# plugin build output (the rendered .plg is tracked separately)
+plugin/dist/

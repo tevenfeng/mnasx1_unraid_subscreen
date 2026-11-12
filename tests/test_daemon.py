@@ -508,7 +508,7 @@ class DiskTemperatureTest(unittest.TestCase):
         asleep = types.SimpleNamespace(
             returncode=2, stdout="Device is in STANDBY mode, exit(2)", stderr="")
         with mock.patch.object(daemon, "_run_smartctl",
-                               lambda dev, device_type=None, use_json=True: asleep):
+                               lambda dev, device_type=None, use_json=True, wake=False: asleep):
             self.assertEqual(daemon._query_smart_temp("sdb"), (None, "standby:sdb"))
 
     def test_real_nvme_payload_yields_a_temperature(self):
@@ -518,14 +518,14 @@ class DiskTemperatureTest(unittest.TestCase):
             '"temperature":{"current":34}}')
         ok = types.SimpleNamespace(returncode=0, stdout=payload, stderr="")
         with mock.patch.object(daemon, "_run_smartctl",
-                               lambda dev, device_type=None, use_json=True: ok):
+                               lambda dev, device_type=None, use_json=True, wake=False: ok):
             self.assertEqual(daemon._query_smart_temp("nvme0n1"),
                              (34, "smartctl:nvme0n1"))
 
     def test_json_flag_failure_falls_back_to_text(self):
         calls = []
 
-        def fake_run(dev, device_type=None, use_json=True):
+        def fake_run(dev, device_type=None, use_json=True, wake=False):
             calls.append((dev, device_type, use_json))
             if use_json:
                 return types.SimpleNamespace(returncode=1, stdout="")
@@ -541,7 +541,7 @@ class DiskTemperatureTest(unittest.TestCase):
     def test_device_type_is_retried_until_one_works(self):
         tried = []
 
-        def fake_run(dev, device_type=None, use_json=True):
+        def fake_run(dev, device_type=None, use_json=True, wake=False):
             tried.append(device_type)
             if device_type == "sat":
                 return types.SimpleNamespace(
@@ -564,7 +564,7 @@ class DiskTemperatureTest(unittest.TestCase):
     def test_failure_reason_includes_the_exit_code(self):
         failed = types.SimpleNamespace(returncode=4, stdout="Read Device Identity failed")
         with mock.patch.object(daemon, "_run_smartctl",
-                               lambda dev, device_type=None, use_json=True: failed):
+                               lambda dev, device_type=None, use_json=True, wake=False: failed):
             self.assertEqual(daemon._query_smart_temp("sdb"),
                              (None, "no-temp:sdb(exit=4)"))
 
@@ -586,7 +586,7 @@ class DiskTemperatureTest(unittest.TestCase):
         collector = daemon.StatsCollector(disk_paths=["/proc"], ifaces=["test0"])
         collector._smart_budget = 0
         with mock.patch.object(daemon, "_query_smart_temp",
-                               side_effect=lambda dev: (30, "smartctl:" + dev)) as query:
+                               side_effect=lambda dev, wake=False: (30, "smartctl:" + dev)) as query:
             self.assertEqual(collector._smart_temp("sdb"), (30, "smartctl:sdb"))
             self.assertEqual(collector._smart_temp("sdc"), (30, "smartctl:sdc"))
         self.assertEqual(query.call_count, 2)
@@ -671,7 +671,7 @@ class DiskTemperatureTest(unittest.TestCase):
                 mock.patch.object(collector, "_block_temp_values",
                                   lambda name: []), \
                 mock.patch.object(daemon, "_query_smart_temp",
-                                  lambda dev: (36, "smartctl:" + dev)):
+                                  lambda dev, wake=False: (36, "smartctl:" + dev)):
             self.assertEqual(
                 collector._disk_temp_detail("/dev/md1", "disk1"),
                 (36, "smartctl:sdc"))
@@ -686,7 +686,7 @@ class DiskTemperatureTest(unittest.TestCase):
                 mock.patch.object(collector, "_block_temp_values",
                                   lambda name: []), \
                 mock.patch.object(daemon, "_query_smart_temp",
-                                  lambda dev: (37, "smartctl:" + dev)):
+                                  lambda dev, wake=False: (37, "smartctl:" + dev)):
             self.assertEqual(
                 collector._disk_temp_detail("/dev/md1p1", "disk1"),
                 (37, "smartctl:nvme1n1"))
@@ -703,7 +703,7 @@ class DiskTemperatureTest(unittest.TestCase):
                 mock.patch.object(collector, "_block_temp_values",
                                   lambda name: []), \
                 mock.patch.object(daemon, "_query_smart_temp",
-                                  lambda dev: (None, "standby:" + dev)):
+                                  lambda dev, wake=False: (None, "standby:" + dev)):
             self.assertEqual(
                 collector._disk_temp_detail("/dev/md1", "disk1"),
                 (34, "unraid:disk1(sleep)"))
@@ -717,7 +717,7 @@ class DiskTemperatureTest(unittest.TestCase):
                 mock.patch.object(collector, "_block_temp_values",
                                   lambda name: []), \
                 mock.patch.object(daemon, "_query_smart_temp",
-                                  lambda dev: (probed.append(dev) or 35,
+                                  lambda dev, wake=False: (probed.append(dev) or 35,
                                                "smartctl:" + dev)):
             self.assertEqual(
                 collector._disk_temp_detail("/dev/sdb1", "TevenDisk"),
@@ -760,7 +760,7 @@ class DiskTemperatureTest(unittest.TestCase):
                 mock.patch.object(collector, "_block_temp_values",
                                   lambda name: []), \
                 mock.patch.object(daemon, "_query_smart_temp",
-                                  lambda dev: (None, "standby:" + dev)):
+                                  lambda dev, wake=False: (None, "standby:" + dev)):
             self.assertEqual(
                 collector._disk_temp_detail("/dev/md1", "disk1"),
                 (0xFF, "standby:sdc"))
@@ -900,7 +900,7 @@ class DiskDiscoveryTest(unittest.TestCase):
                 mock.patch.object(collector, "_block_temp_values",
                                   lambda name: []), \
                 mock.patch.object(daemon, "_query_smart_temp",
-                                  lambda dev: (33, "smartctl:" + dev)), \
+                                  lambda dev, wake=False: (33, "smartctl:" + dev)), \
                 mock.patch.object(daemon.os, "statvfs", lambda path: fake):
             disks = collector._disks()
         self.assertEqual(len(disks), 1)
@@ -922,7 +922,7 @@ class DiskDiscoveryTest(unittest.TestCase):
                 mock.patch.object(collector, "_block_temp_values",
                                   lambda name: []), \
                 mock.patch.object(daemon, "_query_smart_temp",
-                                  lambda dev: (None, "standby:" + dev)), \
+                                  lambda dev, wake=False: (None, "standby:" + dev)), \
                 mock.patch.object(daemon.os, "statvfs", lambda path: fake):
             disks = collector._disks()
         self.assertEqual(len(disks), daemon.MAX_DISKS)
@@ -963,7 +963,7 @@ class CliVersionTest(unittest.TestCase):
         daemon._smart_temp_cache["sdb"] = (now - 60.0, 33, "smartctl:sdb")
         daemon._smart_temp_cache["sdc"] = (now - 60.0, None, "standby:sdc")
         with mock.patch.object(daemon, "_query_smart_temp",
-                               side_effect=lambda dev: (35, "smartctl:" + dev)) as query:
+                               side_effect=lambda dev, wake=False: (35, "smartctl:" + dev)) as query:
             self.assertEqual(collector._smart_temp("sdb"), (33, "smartctl:sdb"))
             self.assertEqual(collector._smart_temp("sdc"), (35, "smartctl:sdc"))
         self.assertEqual(query.call_count, 1)
@@ -1552,7 +1552,47 @@ class LeanFrameTest(unittest.TestCase):
         lean = daemon._lean_frame(packets, False)
         aims = {p[5] for p in lean}
         self.assertFalse(aims & set(daemon.STATIC_AIMS))
-        self.assertTrue({0x01, 0x10, 0x11} <= aims)
+        self.assertTrue({0x10, 0x11, 0x62} <= aims)
+
+    def test_each_tier_fires_on_its_own_cadence(self):
+        packets = self._packets()
+        cadence = daemon.DEFAULT_CADENCE
+
+        def aims(passes):
+            trimmed = daemon._lean_frame(packets, False, passes=passes,
+                                         cadence=cadence)
+            return {p[5] for p in trimmed}
+
+        self.assertIn(0x11, aims(1))        # fast: every frame
+        self.assertNotIn(0x01, aims(1))     # medium: every 2nd
+        self.assertIn(0x01, aims(2))
+        self.assertNotIn(0x51, aims(2))     # slow: every 4th
+        self.assertIn(0x51, aims(4))
+        self.assertNotIn(0x00, aims(4))     # static: every 12th
+        self.assertIn(0x00, aims(12))
+
+    def test_blank_adapter_slots_ride_the_static_tier(self):
+        packets = self._packets()
+        blanks = [p for p in packets if p[5] == 0x60
+                  and not p[22:42].strip(b"\x00")]
+        self.assertTrue(blanks)
+        for packet in blanks:
+            self.assertEqual(daemon._tier_of(packet), daemon.TIER_STATIC)
+
+    def test_cadence_can_be_overridden_from_the_cli(self):
+        args = types.SimpleNamespace(every_fast=3, every_medium=None,
+                                     every_slow=None, every_static=None)
+        cadence = daemon._cadence_of(args)
+        self.assertEqual(cadence[daemon.TIER_FAST], 3)
+        self.assertEqual(cadence[daemon.TIER_STATIC],
+                         daemon.DEFAULT_CADENCE[daemon.TIER_STATIC])
+
+    def test_cadence_never_goes_below_one(self):
+        args = types.SimpleNamespace(every_fast=0, every_medium=-4,
+                                     every_slow=None, every_static=None)
+        cadence = daemon._cadence_of(args)
+        self.assertEqual(cadence[daemon.TIER_FAST], 1)
+        self.assertEqual(cadence[daemon.TIER_MEDIUM], 1)
 
     def test_lean_frame_is_substantially_smaller(self):
         packets = self._packets()
@@ -1616,3 +1656,165 @@ class NetRateSamplerTest(unittest.TestCase):
             one_round()
         self.assertTrue(thread_state["done"])
         self.assertEqual(previous["br0"], (0, 0))
+
+
+class ConfigFileTest(unittest.TestCase):
+    """The plugin's INI file supplies defaults; CLI arguments still win."""
+
+    def _write(self, text):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".cfg", delete=False,
+                                             encoding="utf-8")
+        handle.write(textwrap.dedent(text))
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        return handle.name
+
+    def test_reads_values_and_ignores_noise(self):
+        path = self._write("""\
+            ; a comment
+            [subscreen]
+            pace=2.2
+            layout=paired
+            card_order=mem,cpu,dgpu,igpu
+            disks=/mnt/disk1, /mnt/cache
+            unknown_key=whatever
+            broken line without equals
+            """)
+        defaults = daemon._config_defaults(path)
+        self.assertEqual(defaults["pace"], 2.2)
+        self.assertEqual(defaults["layout"], "paired")
+        self.assertEqual(defaults["card_order"], "mem,cpu,dgpu,igpu")
+        self.assertEqual(defaults["disks"], ["/mnt/disk1", "/mnt/cache"])
+
+    def test_values_are_clamped(self):
+        path = self._write("""\
+            pace=99
+            every_fast=0
+            wlan_slots=9
+            """)
+        defaults = daemon._config_defaults(path)
+        self.assertEqual(defaults["pace"], 5.0)
+        self.assertEqual(defaults["every_fast"], 1)
+        self.assertEqual(defaults["wlan_slots"], 3)
+
+    def test_invalid_choice_falls_back_to_default(self):
+        path = self._write("""\
+            layout=nonsense
+            system_mode=whatever
+            """)
+        defaults = daemon._config_defaults(path)
+        self.assertNotIn("layout", defaults)
+        self.assertNotIn("system_mode", defaults)
+
+    def test_auto_syscount_means_no_override(self):
+        path = self._write("syscount=auto\n")
+        self.assertIsNone(daemon._config_defaults(path)["syscount"])
+
+    def test_source_toggles_map_to_negative_flags(self):
+        path = self._write("""\
+            gpu=0
+            gpu_igpu=0
+            nvidia_smi=0
+            temp_smartctl=0
+            temp_disksini=0
+            wake_disks=1
+            """)
+        defaults = daemon._config_defaults(path)
+        self.assertTrue(defaults["no_gpu"])
+        self.assertTrue(defaults["no_igpu"])
+        self.assertTrue(defaults["no_nvidia_smi"])
+        self.assertTrue(defaults["no_smartctl_temp"])
+        self.assertTrue(defaults["no_disksini_temp"])
+        self.assertTrue(defaults["wake_disks"])
+
+    def test_missing_file_is_harmless(self):
+        self.assertEqual(daemon._config_defaults("/nonexistent/x.cfg"), {})
+
+    def test_config_path_is_found_in_argv(self):
+        self.assertEqual(
+            daemon._config_path_from_argv(["run", "--config", "/tmp/a.cfg"]),
+            "/tmp/a.cfg")
+        self.assertEqual(
+            daemon._config_path_from_argv(["run", "--config=/tmp/b.cfg"]),
+            "/tmp/b.cfg")
+        self.assertEqual(daemon._config_path_from_argv(["run"]),
+                         daemon.CONFIG_PATH_DEFAULT)
+
+    def test_cli_beats_the_config_file(self):
+        path = self._write("pace=3.0\nlayout=paired\n")
+        parser = daemon.build_parser()
+        parser.set_defaults(**daemon._config_defaults(path))
+        args = parser.parse_args(["run", "--pace", "1.2"])
+        self.assertEqual(args.pace, 1.2)          # explicit CLI wins
+        self.assertEqual(args.layout, "paired")   # config fills the rest
+
+    def test_config_supplies_defaults_when_cli_is_silent(self):
+        path = self._write("pace=3.0\nevery_slow=9\n")
+        parser = daemon.build_parser()
+        parser.set_defaults(**daemon._config_defaults(path))
+        args = parser.parse_args(["run"])
+        self.assertEqual(args.pace, 3.0)
+        self.assertEqual(args.every_slow, 9)
+
+
+class CollectorSwitchesTest(unittest.TestCase):
+    """The settings page's toggles must actually reach the collector."""
+
+    def _collector(self, **flags):
+        args = types.SimpleNamespace(**{
+            "no_gpu": False, "no_igpu": False, "no_dgpu": False,
+            "no_nvidia_smi": False, "no_hwmon_temp": False,
+            "no_smartctl_temp": False, "no_disksini_temp": False,
+            "wake_disks": False, "disks": [], "ifaces": [],
+            "wlan_total_unit": "auto",
+        })
+        for key, value in flags.items():
+            setattr(args, key, value)
+        return daemon._make_collector(args)
+
+    def test_defaults_enable_every_source(self):
+        collector = self._collector()
+        self.assertTrue(collector.temp_hwmon)
+        self.assertTrue(collector.temp_smartctl)
+        self.assertTrue(collector.temp_disksini)
+        self.assertTrue(collector.use_nvidia_smi)
+        self.assertFalse(collector.wake_disks)
+
+    def test_flags_turn_sources_off(self):
+        collector = self._collector(no_hwmon_temp=True, no_nvidia_smi=True,
+                                    wake_disks=True, no_dgpu=True)
+        self.assertFalse(collector.temp_hwmon)
+        self.assertFalse(collector.use_nvidia_smi)
+        self.assertTrue(collector.wake_disks)
+        self.assertFalse(collector.use_dgpu)
+
+    def test_disabling_both_expensive_tiers_leaves_the_fallback(self):
+        collector = self._collector(no_hwmon_temp=True, no_smartctl_temp=True)
+        collector._smart_temp = mock.Mock(return_value=(40, "smartctl:sdb"))
+        collector._block_temp_values = mock.Mock(return_value=[41])
+        collector.temp_disksini = True
+        value, source = collector._disk_temp_detail("/dev/sdb", "disk1",
+                                                    table={"disk1": {"temp": "38"}})
+        self.assertEqual((value, source), (38, "unraid:disk1"))
+        collector._smart_temp.assert_not_called()
+        collector._block_temp_values.assert_not_called()
+
+    def test_wake_flag_reaches_smartctl(self):
+        class Result:
+            returncode = 0
+            stdout = '{"temperature": {"current": 33}}'
+            stderr = ""
+
+        seen = []
+
+        def fake_run(command, **kwargs):
+            seen.append(command)
+            return Result()
+
+        with mock.patch.object(daemon, "_find_smartctl",
+                               return_value="/usr/sbin/smartctl"), \
+                mock.patch.object(daemon.subprocess, "run", fake_run):
+            daemon._query_smart_temp("sdb", wake=False)
+            daemon._query_smart_temp("sdb", wake=True)
+        self.assertIn("-n", seen[0])
+        self.assertNotIn("-n", seen[1])

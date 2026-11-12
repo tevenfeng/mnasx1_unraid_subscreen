@@ -1,0 +1,75 @@
+<?xml version='1.0' standalone='yes'?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "mnasx1-subscreen">
+<!ENTITY author    "tevenfeng">
+<!ENTITY version   "__VERSION__">
+<!ENTITY flash     "/boot/config/plugins/&name;">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+<!ENTITY pkg       "&name;-&version;-x86_64-1.txz">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;"
+        launch="Settings/mnasx1-subscreen"
+        pluginURL="https://raw.githubusercontent.com/tevenfeng/mnasx1_unraid_subscreen/main/plugin/mnasx1-subscreen.plg"
+        icon="desktop"
+        support="https://github.com/tevenfeng/mnasx1_unraid_subscreen/issues"
+        min="6.12.0">
+
+<CHANGES>
+### &version;
+- 首个插件版 / First plugin release
+- 屏幕驱动守护进程开机自动恢复 / Daemon restored on every boot
+- 设置页：刷新节奏、版式、卡片顺序、数据源、面板按键 / Settings page
+</CHANGES>
+
+<!-- Payload. The filename carries the version on purpose: the plugin manager
+     skips the download when the destination already exists, so a constant name
+     would silently keep installing the previous build after an upgrade. -->
+<FILE Name="&flash;/&pkg;" Run="upgradepkg --install-new --reinstall">
+<URL>https://github.com/tevenfeng/mnasx1_unraid_subscreen/releases/download/&version;/&pkg;</URL>
+<SHA256>__SHA256__</SHA256>
+</FILE>
+
+<!-- Runs on every boot, after the package is unpacked into RAM. -->
+<FILE Run="/bin/bash">
+<INLINE><![CDATA[
+chmod 755 /usr/local/emhttp/plugins/mnasx1-subscreen/event/* \
+          /usr/local/emhttp/plugins/mnasx1-subscreen/scripts/*.sh 2>/dev/null || true
+
+# The settings page reads this marker; it must not block installation when the
+# host has no Python (Unraid's base system ships none).
+if ! command -v python3 >/dev/null 2>&1; then
+  logger -t mnasx1-subscreen "python3 not found - install NerdTools or a Python 3 plugin"
+fi
+
+# Migration: earlier manual installs wrote an rc script and a /boot/config/go
+# line. Leaving either behind means two daemons fighting over the USB port.
+sed -i '\|/boot/config/plugins/subscreen/rc.subscreen start|d' /boot/config/go 2>/dev/null || true
+rm -f /etc/rc.d/rc.subscreen
+
+# Refresh the translation-free page cache is unnecessary (the page is bilingual
+# inline), but a stale .dot from an older layout would hide the new one.
+rm -f /usr/local/emhttp/languages/*/mnasx1-subscreen.dot 2>/dev/null || true
+
+# The daemon is started by event/started, not here: at this point the array is
+# not mounted yet and /mnt/disk* does not exist.
+exit 0
+]]></INLINE>
+</FILE>
+
+<FILE Run="/bin/bash" Method="remove">
+<INLINE><![CDATA[
+[ -x /usr/local/emhttp/plugins/mnasx1-subscreen/scripts/stop.sh ] && \
+  /usr/local/emhttp/plugins/mnasx1-subscreen/scripts/stop.sh >/dev/null 2>&1
+
+removepkg mnasx1-subscreen 2>/dev/null || true
+rm -rf /usr/local/emhttp/plugins/mnasx1-subscreen
+rm -rf /usr/local/lib/mnasx1-subscreen
+rm -f /var/run/mnasx1-subscreen.pid
+# /boot/config/plugins/mnasx1-subscreen is kept on purpose: it holds the user's
+# settings and the cached payload, and a reinstall should pick both up again.
+exit 0
+]]></INLINE>
+</FILE>
+
+</PLUGIN>

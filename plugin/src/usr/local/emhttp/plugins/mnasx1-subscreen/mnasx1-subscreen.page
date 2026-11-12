@@ -1,0 +1,288 @@
+Menu="Settings"
+Title="屏幕驱动 / Panel"
+Icon="desktop"
+---
+<?php
+require_once '/usr/local/emhttp/plugins/mnasx1-subscreen/include/lib.php';
+
+$cfg = subsys_read_config();
+$running = subsys_daemon_running();
+$python = subsys_python();
+$pythonOk = $python !== '' && is_executable($python);
+$note = (string)($_GET['note'] ?? '');
+$error = (string)($_GET['error'] ?? '');
+$output = (string)($_GET['output'] ?? '');
+
+$disks = subsys_discover_disks();
+$ifaces = subsys_discover_ifaces();
+$configuredDisks = $cfg['disks'] === '' ? $disks : array_filter(array_map('trim', explode(',', $cfg['disks'])));
+$configuredIfaces = $cfg['ifaces'] === '' ? $ifaces : array_filter(array_map('trim', explode(',', $cfg['ifaces'])));
+$autoDisks = $cfg['disks'] === '';
+$autoIfaces = $cfg['ifaces'] === '';
+$order = array_pad(array_filter(array_map('trim', explode(',', $cfg['card_order']))), 4, '');
+$version = is_readable(SUBSYS_APP_DIR . '/VERSION')
+    ? trim((string)file_get_contents(SUBSYS_APP_DIR . '/VERSION')) : 'unknown';
+$logTail = [];
+if (is_readable('/var/log/mnasx1-subscreen.log')) {
+    $logTail = array_slice(file('/var/log/mnasx1-subscreen.log', FILE_IGNORE_NEW_LINES) ?: [], -6);
+}
+$labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'dgpu' => '独显 DGPU'];
+?>
+
+<style>
+  .subsys-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 24px; }
+  .subsys-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0; }
+  .subsys-row label:first-child { flex: 1 1 auto; }
+  .subsys-row input[type=number], .subsys-row select { width: 120px; }
+  .subsys-hint { color: #888; font-size: 11px; margin: -2px 0 8px; }
+  .subsys-bad { color: #c33; font-weight: bold; }
+  .subsys-ok { color: #2a7; font-weight: bold; }
+  .subsys-card { border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; margin-bottom: 14px; }
+  .subsys-card h3 { margin: 0 0 8px; }
+  pre.subsys-log { max-height: 120px; overflow: auto; background: #f7f7f7; padding: 8px; font-size: 11px; }
+</style>
+
+<?php if ($error !== ''): ?>
+<div class="subsys-card" style="border-color:#c33">
+  <span class="subsys-bad">错误 / Error:</span> <?=subsys_h($error)?>
+</div>
+<?php elseif ($note !== ''): ?>
+<div class="subsys-card" style="border-color:#2a7">
+  <span class="subsys-ok">已保存 / Saved.</span>
+  <?php if ($output !== ''): ?><br><small><?=subsys_h($output)?></small><?php endif; ?>
+</div>
+<?php endif; ?>
+
+<div class="subsys-card">
+  <h3>状态 / Status</h3>
+  <div class="subsys-grid">
+    <div class="subsys-row">
+      <span>守护进程 / Daemon</span>
+      <span class="<?=$running ? 'subsys-ok' : 'subsys-bad'?>"><?=$running ? '运行中 running' : '已停止 stopped'?></span>
+    </div>
+    <div class="subsys-row">
+      <span>Python（≥ 3.7）</span>
+      <span class="<?=$pythonOk ? 'subsys-ok' : 'subsys-bad'?>">
+        <?=$pythonOk ? subsys_h(basename($python)) : '缺失 missing'?>
+      </span>
+    </div>
+    <div class="subsys-row">
+      <span>插件版本 / Plugin</span>
+      <span><?=subsys_h($version)?></span>
+    </div>
+    <div class="subsys-row">
+      <span>配置 / Config</span>
+      <span><small><?=subsys_h(SUBSYS_CONFIG)?></small></span>
+    </div>
+  </div>
+  <?php if (!$pythonOk): ?>
+  <p class="subsys-bad">
+    Unraid 基础系统不含 Python。请先安装 NerdTools 或 Python 3 插件，否则守护进程无法启动。<br>
+    Unraid ships no Python: install NerdTools or a Python 3 plugin first.
+  </p>
+  <?php endif; ?>
+  <?php if ($logTail): ?>
+  <pre class="subsys-log"><?=subsys_h(implode("\n", $logTail))?></pre>
+  <?php endif; ?>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+    <?php foreach ([['start', '启动 Start'], ['stop', '停止 Stop'],
+                    ['restart', '重启 Restart'], ['once', '推送一帧 Push once'],
+                    ['reset', '复位 USB Reset']] as [$cmd, $label]): ?>
+    <form method="post" action="/plugins/mnasx1-subscreen/include/action.php" style="margin:0">
+      <input type="hidden" name="action" value="<?=$cmd?>">
+      <button type="submit" <?=($cmd === 'start' && !$pythonOk) ? 'disabled' : ''?>><?=$label?></button>
+    </form>
+    <?php endforeach; ?>
+    <a class="button" href="/plugins/mnasx1-subscreen/include/diagnose.php">下载诊断 / Diagnostics</a>
+  </div>
+  <p class="subsys-hint">「推送一帧」与「复位 USB」需要先停止守护进程（USB 端口只能被一个进程占用）。 / Push-once and Reset need the daemon stopped: only one process can own the USB interface.</p>
+</div>
+
+<form method="post" action="/plugins/mnasx1-subscreen/include/save.php">
+
+<div class="subsys-card">
+  <h3>刷新节奏 / Refresh cadence</h3>
+  <div class="subsys-grid">
+    <div class="subsys-row">
+      <label for="pace">发送间隔 / Packet gap（秒）</label>
+      <input id="pace" type="number" name="pace" step="0.1" min="0.5" max="5"
+             value="<?=subsys_h($cfg['pace'])?>">
+    </div>
+    <div class="subsys-row">
+      <label for="every_fast">实时值 / fast（每 N 帧）</label>
+      <input id="every_fast" type="number" name="every_fast" min="1" max="60"
+             value="<?=subsys_h($cfg['every_fast'])?>">
+    </div>
+    <div class="subsys-row">
+      <label for="every_medium">时间与网卡 / medium</label>
+      <input id="every_medium" type="number" name="every_medium" min="1" max="60"
+             value="<?=subsys_h($cfg['every_medium'])?>">
+    </div>
+    <div class="subsys-row">
+      <label for="every_slow">磁盘与流量 / slow</label>
+      <input id="every_slow" type="number" name="every_slow" min="1" max="60"
+             value="<?=subsys_h($cfg['every_slow'])?>">
+    </div>
+    <div class="subsys-row">
+      <label for="every_static">静态页 / static</label>
+      <input id="every_static" type="number" name="every_static" min="1" max="60"
+             value="<?=subsys_h($cfg['every_static'])?>">
+    </div>
+  </div>
+  <p class="subsys-hint">
+    每包等待时间。实测低于 1.0 秒会积压并让面板卡死（按键也失效），0.5 是下限而不是建议值。<br>
+    Time between packets. Below 1.0 s the panel builds a backlog, freezes and stops taking input.
+  </p>
+</div>
+
+<div class="subsys-card">
+  <h3>显示内容 / Display</h3>
+  <div class="subsys-grid">
+    <div class="subsys-row">
+      <label for="layout">版式 / Layout</label>
+      <select id="layout" name="layout">
+        <option value="per-page" <?=$cfg['layout'] === 'per-page' ? 'selected' : ''?>>一页一卡 per-page</option>
+        <option value="paired" <?=$cfg['layout'] === 'paired' ? 'selected' : ''?>>两块一页 paired</option>
+      </select>
+    </div>
+    <div class="subsys-row">
+      <label for="syscount">卡片数量 / Cards</label>
+      <select id="syscount" name="syscount">
+        <option value="auto" <?=$cfg['syscount'] === 'auto' ? 'selected' : ''?>>自动 auto</option>
+        <option value="3" <?=$cfg['syscount'] === '3' ? 'selected' : ''?>>3</option>
+        <option value="4" <?=$cfg['syscount'] === '4' ? 'selected' : ''?>>4</option>
+      </select>
+    </div>
+    <div class="subsys-row">
+      <label for="wlan_slots">网卡槽位 / Adapter slots</label>
+      <select id="wlan_slots" name="wlan_slots">
+        <?php foreach ([1, 2, 3] as $slots): ?>
+        <option value="<?=$slots?>" <?=(string)$slots === $cfg['wlan_slots'] ? 'selected' : ''?>><?=$slots?></option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+    <div class="subsys-row">
+      <label for="wlan_total_unit">累计流量单位 / Traffic unit</label>
+      <select id="wlan_total_unit" name="wlan_total_unit">
+        <?php foreach (['auto', 'kb', 'mb', 'gb', 'tb'] as $unit): ?>
+        <option value="<?=$unit?>" <?=$cfg['wlan_total_unit'] === $unit ? 'selected' : ''?>><?=$unit?></option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+  </div>
+
+  <p class="subsys-hint">卡片顺序 / Card order（四个槽位各选一张，不能重复）</p>
+  <div class="subsys-grid">
+    <?php foreach (['slot1', 'slot2', 'slot3', 'slot4'] as $index => $slot): ?>
+    <div class="subsys-row">
+      <label for="<?=$slot?>">槽位 <?=$index + 1?></label>
+      <select id="<?=$slot?>" name="<?=$slot?>">
+        <?php foreach ($labels as $value => $text): ?>
+        <option value="<?=$value?>" <?=(($order[$index] ?? '') === $value) ? 'selected' : ''?>><?=$text?></option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+    <?php endforeach; ?>
+  </div>
+
+  <p class="subsys-hint">高级 / Advanced：页面块是否携带数值。默认 both 最接近实测可用的行为。 / Whether the page blocks also carry values.</p>
+  <div class="subsys-grid">
+    <div class="subsys-row">
+      <label for="system_mode">数值通道 / Value channel</label>
+      <select id="system_mode" name="system_mode">
+        <?php foreach (['both', 'vendor', 'legacy'] as $mode): ?>
+        <option value="<?=$mode?>" <?=$cfg['system_mode'] === $mode ? 'selected' : ''?>><?=$mode?></option>
+        <?php endforeach; ?>
+      </select>
+    </div>
+  </div>
+</div>
+
+<div class="subsys-card">
+  <h3>数据源 / Data sources</h3>
+
+  <p class="subsys-hint">磁盘 / Disks（不勾选「自动」时只上报勾选的挂载点，最多 8 个）</p>
+  <label style="display:block;margin-bottom:6px">
+    <input type="checkbox" name="auto_disks" value="1" <?=$autoDisks ? 'checked' : ''?>
+           onchange="document.querySelectorAll('input.subsys-disk').forEach(function(el){el.disabled=this.checked;}, this)">
+    自动发现 / Auto-discover
+  </label>
+  <div class="subsys-grid">
+    <?php foreach ($disks as $mount): ?>
+    <label class="subsys-disk">
+      <input type="checkbox" class="subsys-disk" name="disks[]" value="<?=subsys_h($mount)?>"
+             <?=in_array($mount, $configuredDisks, true) ? 'checked' : ''?>
+             <?=$autoDisks ? 'disabled' : ''?>>
+      <?=subsys_h($mount)?>
+    </label>
+    <?php endforeach; ?>
+  </div>
+
+  <p class="subsys-hint">
+    勾选「自动」时按挂载点自动发现；取消自动后一个都不勾选，等同自动。<br>
+    Auto-discover follows the mounts; leaving manual selection empty also means auto.
+  </p>
+
+  <p class="subsys-hint" style="margin-top:12px">网卡 / Interfaces（持有 IPv4 的接口）</p>
+  <label style="display:block;margin-bottom:6px">
+    <input type="checkbox" name="auto_ifaces" value="1" <?=$autoIfaces ? 'checked' : ''?>
+           onchange="document.querySelectorAll('input.subsys-iface').forEach(function(el){el.disabled=this.checked;}, this)">
+    自动发现 / Auto-discover
+  </label>
+  <div class="subsys-grid">
+    <?php foreach ($ifaces as $iface): ?>
+    <label class="subsys-iface">
+      <input type="checkbox" class="subsys-iface" name="ifaces[]" value="<?=subsys_h($iface)?>"
+             <?=in_array($iface, $configuredIfaces, true) ? 'checked' : ''?>
+             <?=$autoIfaces ? 'disabled' : ''?>>
+      <?=subsys_h($iface)?>
+    </label>
+    <?php endforeach; ?>
+  </div>
+
+  <div class="subsys-grid" style="margin-top:12px">
+    <?php
+    $toggles = [
+        ['gpu', '启用 GPU 卡 / GPU cards'],
+        ['gpu_igpu', '  └ 核显 / iGPU'],
+        ['gpu_dgpu', '  └ 独显 / DGPU'],
+        ['nvidia_smi', '  └ 使用 nvidia-smi'],
+        ['temp_hwmon', '温度来源 / Temp: hwmon'],
+        ['temp_smartctl', '  └ smartctl'],
+        ['temp_disksini', '  └ disks.ini'],
+        ['wake_disks', '允许唤醒休眠盘 / Wake sleeping disks'],
+        ['log_verbose', '详细日志 / Verbose log'],
+    ];
+    foreach ($toggles as [$key, $label]): ?>
+    <div class="subsys-row">
+      <label><?=$label?></label>
+      <input type="hidden" name="<?=$key?>" value="0">
+      <input type="checkbox" name="<?=$key?>" value="1" <?=$cfg[$key] === '1' ? 'checked' : ''?>>
+    </div>
+    <?php endforeach; ?>
+  </div>
+  <p class="subsys-hint">
+    关闭 nvidia-smi 后 NVIDIA 卡不会有任何读数；关闭全部温度来源会被强制保留 hwmon 一个。<br>
+    With nvidia-smi off, NVIDIA cards report nothing. At least one temperature source is always kept.
+  </p>
+</div>
+
+<div class="subsys-card">
+  <h3>面板按键 / Panel buttons</h3>
+  <div class="subsys-row">
+    <label>休眠键执行关机 / Hibernate button runs shutdown</label>
+    <input type="hidden" name="allow_hibernate" value="0">
+    <input type="checkbox" name="allow_hibernate" value="1" <?=$cfg['allow_hibernate'] === '1' ? 'checked' : ''?>>
+  </div>
+  <p class="subsys-hint">
+    开启后按屏幕上的休眠键会立即执行 <code>shutdown -h now</code>，请谨慎。静音/性能模式键在 Linux 下只记录日志。<br>
+    Enabling this runs <code>shutdown -h now</code> when the hibernate key is pressed.
+  </p>
+</div>
+
+<div style="display:flex;gap:10px;justify-content:flex-end">
+  <button type="submit" class="button">保存并重启守护进程 / Save &amp; restart</button>
+</div>
+
+</form>

@@ -1,0 +1,4 @@
+#!/bin/bash
+# Array is about to unmount: stop before the disk paths disappear.
+/usr/local/emhttp/plugins/mnasx1-subscreen/scripts/stop.sh >/dev/null 2>&1
+exit 0

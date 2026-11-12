@@ -668,6 +668,10 @@ def _sequence(snapshot, builder, args):
 DRM_ROOT = "/sys/class/drm"
 HWMON_ROOT = "/sys/class/hwmon"
 GPU_TTL = 1.0
+# Fan and temperature move slowly and reading them costs a sysfs walk.
+FAN_TTL = 2.0
+# nvidia-smi spawns a process, so it is refreshed on its own slower clock.
+NVIDIA_TTL = 5.0
 # Seconds between packets while running: the panel drains ~3 packets a second.
 RUN_PACE = 1.5
 # Interface counters are sampled once a second in their own thread so a frame
@@ -675,30 +679,86 @@ RUN_PACE = 1.5
 NET_SAMPLE_INTERVAL = 1.0
 NET_RATE_ALPHA = 0.3
 NET_RATE_TTL = 4.0
-# Pages that never change between frames. Re-sending them costs the panel a
-# third of its bandwidth for nothing, so `run` sends them only when it starts
-# (and every LEAN_FULL_EVERY passes, to survive a panel-side reset).
-STATIC_AIMS = frozenset({0x00, 0x65, 0x70, 0xA0})
-# Disk pages change once a minute at most (temperatures), so they ride a slower
-# cadence than the live counters.
-SLOW_AIMS = frozenset({0x50, 0x51})
-LEAN_FULL_EVERY = 12
-LEAN_SLOW_EVERY = 4
+# Every page carries data that changes at a different speed, and the panel
+# renders maybe three packets a second, so sending a slowly-changing page at the
+# same rate as a live counter wastes the budget the fast values need.
+#
+#   fast   - usage, temperature, fan, link speed: every frame
+#   medium - time (minute resolution), adapter rows (name/IP): every 2nd frame
+#   slow   - disk usage/temperature, cumulative traffic: every 4th frame
+#   static - home, mode, info, online flag, uncached adapter slots: every 12th
+TIER_FAST = "fast"
+TIER_MEDIUM = "medium"
+TIER_SLOW = "slow"
+TIER_STATIC = "static"
+
+DEFAULT_CADENCE = {
+    TIER_FAST: 1,
+    TIER_MEDIUM: 2,
+    TIER_SLOW: 4,
+    TIER_STATIC: 12,
+}
+
+AIM_TIER = {
+    0x00: TIER_STATIC,   # home page
+    0x01: TIER_MEDIUM,   # time
+    0x10: TIER_FAST,     # system page (temperature, fan)
+    0x11: TIER_FAST,     # system item (usage, temperature, fan)
+    0x50: TIER_SLOW,     # disk page (usage)
+    0x51: TIER_SLOW,     # disk item (usage, temperature)
+    0x60: TIER_MEDIUM,   # adapter row (name, IP, speed)
+    0x61: TIER_STATIC,   # adapter online flag
+    0x62: TIER_FAST,     # adapter speed
+    0x64: TIER_SLOW,     # cumulative traffic
+    0x65: TIER_STATIC,   # adapter IP
+    0x70: TIER_STATIC,   # mode page
+    0xA0: TIER_STATIC,   # info pages
+}
+
+# Kept for callers that only know about the old two-tier switch.
+STATIC_AIMS = frozenset(aim for aim, tier in AIM_TIER.items()
+                       if tier == TIER_STATIC)
+SLOW_AIMS = frozenset(aim for aim, tier in AIM_TIER.items()
+                      if tier == TIER_SLOW)
+LEAN_FULL_EVERY = DEFAULT_CADENCE[TIER_STATIC]
+LEAN_SLOW_EVERY = DEFAULT_CADENCE[TIER_SLOW]
 
 
-def _lean_frame(packets, full, slow=False):
-    """Trim a frame to what actually changes.
+def _is_blank_adapter(packet):
+    """True for the zero-filled padding slots that fill the adapter table."""
+    try:
+        return (packet[5] == 0x60 and not packet[22:42].strip(b"\x00")
+                and not packet[18:22].strip(b"\x00"))
+    except IndexError:
+        return False
 
-    `full` sends everything, `slow` adds the disk pages, otherwise only the
-    live counters (time, system pages/items, network) go out.
+
+def _tier_of(packet):
+    if _is_blank_adapter(packet):
+        return TIER_STATIC
+    return AIM_TIER.get(packet[5], TIER_FAST)
+
+
+def _lean_frame(packets, full, slow=False, passes=1, cadence=None):
+    """Trim a frame to the pages whose data is due on this pass.
+
+    `full` forces everything out (used when the panel may have been reset).
+    `slow` is the legacy two-tier switch: keep the slow pages in this pass.
+    Otherwise each page follows its own cadence, `cadence[tier]` in frames.
     """
     if full:
         return packets
-    skip = STATIC_AIMS if slow else STATIC_AIMS | SLOW_AIMS
-    return [packet for packet in packets if packet[5] not in skip]
-# nvidia-smi spawns a process, so it is refreshed on its own slower clock.
-NVIDIA_TTL = 5.0
-FAN_TTL = 2.0
+    rates = dict(DEFAULT_CADENCE if cadence is None else cadence)
+    needed = []
+    for packet in packets:
+        tier = _tier_of(packet)
+        if slow and tier == TIER_SLOW:
+            needed.append(packet)
+            continue
+        every = max(1, int(rates.get(tier, 1)))
+        if every <= 1 or passes % every == 0:
+            needed.append(packet)
+    return needed
 
 
 @dataclass
@@ -1117,12 +1177,19 @@ def _smart_summary(result):
     return lines[0] if lines else ""
 
 
-def _run_smartctl(dev, device_type=None, use_json=True):
-    """Run smartctl for one device; None when the host has no smartctl."""
+def _run_smartctl(dev, device_type=None, use_json=True, wake=False):
+    """Run smartctl for one device; None when the host has no smartctl.
+
+    `-n standby` keeps a sleeping disk asleep and is the default. `wake=True`
+    drops it, which spins the disk up to read its temperature - only used when
+    the user explicitly opts in.
+    """
     binary = _find_smartctl()
     if not binary:
         return None
-    command = [binary, "-A", "-n", "standby"]
+    command = [binary, "-A"]
+    if not wake:
+        command += ["-n", "standby"]
     if device_type:
         command += ["-d", device_type]
     if use_json:
@@ -1178,7 +1245,7 @@ def _smart_says_standby(result):
     return False
 
 
-def _query_smart_temp(dev):
+def _query_smart_temp(dev, wake=False):
     """Return (celsius or None, reason).
 
     Bare invocations fail for common Unraid setups (USB bridges need ``-d
@@ -1196,12 +1263,13 @@ def _query_smart_temp(dev):
 
     last_exit = None
     for device_type in candidates:
-        result = _run_smartctl(dev, device_type)
+        result = _run_smartctl(dev, device_type, wake=wake)
         if result is None:
             return None, "no-smartctl"
         if result.returncode & 0x01:
             # Bit 0: the command line did not parse (e.g. --json on 6.4).
-            result = _run_smartctl(dev, device_type, use_json=False)
+            result = _run_smartctl(dev, device_type, use_json=False,
+                                   wake=wake)
             if result is None:
                 return None, "no-smartctl"
         last_exit = result.returncode
@@ -1489,6 +1557,16 @@ class StatsCollector:
         self._nvidia_next = 0.0
         self._nvidia_cache = None
         self.no_gpu = False
+        # Data-source switches, all on unless the user turns them off in the
+        # settings page. Turning a tier off makes the panel show "--" rather
+        # than silently falling back to something the user distrusted.
+        self.temp_hwmon = True
+        self.temp_smartctl = True
+        self.temp_disksini = True
+        self.wake_disks = False
+        self.use_igpu = True
+        self.use_dgpu = True
+        self.use_nvidia_smi = True
         self._gpu_cache = (None, None)
         self._gpu_next = 0.0
         self._fan_cache = NO_VALUE
@@ -1722,7 +1800,7 @@ class StatsCollector:
             if self._smart_budget <= 0:
                 return cached[1], cached[2]
             self._smart_budget -= 1
-        value, reason = _query_smart_temp(dev)
+        value, reason = _query_smart_temp(dev, wake=self.wake_disks)
         _smart_temp_cache[dev] = (now, value, reason)
         return value, reason
 
@@ -1755,10 +1833,11 @@ class StatsCollector:
             except OSError:
                 continue
 
-        for candidate in names:
-            values = self._block_temp_values(candidate)
-            if values:
-                return max(values), "hwmon:" + candidate
+        if self.temp_hwmon:
+            for candidate in names:
+                values = self._block_temp_values(candidate)
+                if values:
+                    return max(values), "hwmon:" + candidate
 
         # smartctl reads the current value; prefer it over the temperature
         # emhttpd last cached in disks.ini (which can be minutes old).
@@ -1767,7 +1846,7 @@ class StatsCollector:
         physical = [name for name in names
                     if name.startswith(("sd", "nvme", "hd", "vd", "mmcblk"))]
         physical.sort(key=_is_partition)   # whole disks first, partitions after
-        for candidate in physical:
+        for candidate in (physical if self.temp_smartctl else []):
             value, why = self._smart_temp(candidate)
             if value is not None:
                 return value, why
@@ -1782,7 +1861,7 @@ class StatsCollector:
         # Fallback: emhttpd already read this disk for the web UI, and
         # Unassigned Devices displays the same value. It is free, works while
         # a disk sleeps, and keeps the panel in step with the web UI.
-        value = _sane_temp(fields.get("temp", ""))
+        value = _sane_temp(fields.get("temp", "")) if self.temp_disksini else None
         if value is not None:
             asleep = fields.get("spundown", "0") == "1" or reason.startswith("standby")
             return value, "unraid:%s%s" % (name, "(sleep)" if asleep else "")
@@ -1874,7 +1953,9 @@ class StatsCollector:
         # sysfs knows an NVIDIA card exists but exposes no counters for it, so
         # nvidia-smi is the only source of usage/temperature/fan. It is asked
         # whenever it exists, not only when sysfs came up empty.
-        if now >= self._nvidia_next:
+        if not self.use_nvidia_smi:
+            self._nvidia_cache = None
+        elif now >= self._nvidia_next:
             self._nvidia_next = now + NVIDIA_TTL
             nvidia = self._nvidia_gpu(now)
             if nvidia is not None:
@@ -1884,6 +1965,10 @@ class StatsCollector:
                 dgpu = self._nvidia_cache
         elif self._nvidia_cache is not None:
             dgpu = self._nvidia_cache
+        if not self.use_igpu:
+            igpu = None
+        if not self.use_dgpu:
+            dgpu = None
         self._gpu_cache = (igpu, dgpu)
         return self._gpu_cache
 
@@ -2232,6 +2317,13 @@ def _total_unit(args):
 def _make_collector(args):
     collector = _build_collector(args)
     collector.no_gpu = bool(getattr(args, "no_gpu", False))
+    collector.use_igpu = not getattr(args, "no_igpu", False)
+    collector.use_dgpu = not getattr(args, "no_dgpu", False)
+    collector.use_nvidia_smi = not getattr(args, "no_nvidia_smi", False)
+    collector.temp_hwmon = not getattr(args, "no_hwmon_temp", False)
+    collector.temp_smartctl = not getattr(args, "no_smartctl_temp", False)
+    collector.temp_disksini = not getattr(args, "no_disksini_temp", False)
+    collector.wake_disks = bool(getattr(args, "wake_disks", False))
     return collector
 
 
@@ -2316,11 +2408,14 @@ def cmd_run(args):
                     _log("stats/build failed: %s" % exc)
                     stop_event.wait(args.interval)
                     continue
-                if getattr(args, "lean", True):
-                    full = passes % LEAN_FULL_EVERY == 0
-                    slow = full or passes % LEAN_SLOW_EVERY == 0
-                    packets = _lean_frame(packets, full, slow)
                 passes += 1
+                if getattr(args, "lean", True):
+                    cadence = _cadence_of(args)
+                    # The first frame (and every static period after it) sends
+                    # everything, so a fresh or reset panel is fully populated.
+                    full = (passes - 1) % cadence[TIER_STATIC] == 0
+                    packets = _lean_frame(packets, full, passes=passes,
+                                          cadence=cadence)
                 try:
                     _write_frame(transport, packets, _run_pace(args),
                                  progress=True)
@@ -2356,6 +2451,134 @@ def _reset_port(transport):
     except OSError as exc:
         _log("panel: port reset failed: %s" % exc)
         return False
+
+
+CONFIG_PATH_DEFAULT = "/boot/config/plugins/mnasx1-subscreen/mnasx1-subscreen.cfg"
+
+
+def _config_path_from_argv(argv):
+    """Find --config before argparse runs, so the file can supply defaults."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    for index, token in enumerate(args):
+        if token == "--config" and index + 1 < len(args):
+            return args[index + 1]
+        if token.startswith("--config="):
+            return token.split("=", 1)[1]
+    return CONFIG_PATH_DEFAULT
+
+
+def _read_config(path):
+    """Parse the plugin's INI file into a flat {key: value} dict.
+
+    Deliberately tolerant: unknown keys are ignored, sections are optional,
+    comments start with ; or #, and a malformed line never raises - a broken
+    config must not stop the daemon from starting.
+    """
+    values = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line[0] in ";#[" or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip().lower()
+                value = value.strip().strip('"').strip("'")
+                if key:
+                    values[key] = value
+    except OSError:
+        return {}
+    return values
+
+
+def _as_bool(value, default):
+    text = str(value).strip().lower()
+    if text in ("1", "yes", "true", "on"):
+        return True
+    if text in ("0", "no", "false", "off"):
+        return False
+    return default
+
+
+def _as_list(value):
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _config_defaults(path):
+    """Map config keys onto argparse dests. CLI arguments still win."""
+    cfg = _read_config(path)
+    if not cfg:
+        return {}
+    defaults = {}
+
+    def take(key, dest, caster, low=None, high=None):
+        if key not in cfg:
+            return
+        try:
+            value = caster(cfg[key])
+        except (TypeError, ValueError):
+            return
+        if low is not None:
+            value = max(low, value)
+        if high is not None:
+            value = min(high, value)
+        defaults[dest] = value
+
+    take("pace", "pace", float, 0.5, 5.0)
+    take("packet_delay", "packet_delay", float, 0.0, 5.0)
+    take("interval", "interval", float, 0.1, 3600.0)
+    take("repeat", "repeat", int, 1, 100)
+    take("every_fast", "every_fast", int, 1, 60)
+    take("every_medium", "every_medium", int, 1, 60)
+    take("every_slow", "every_slow", int, 1, 60)
+    take("every_static", "every_static", int, 1, 60)
+    take("wlan_slots", "wlan_slots", int, 1, 3)
+    take("syscount", "syscount", lambda v: None if str(v).lower() == "auto"
+         else int(v), None, None)
+
+    if "layout" in cfg and cfg["layout"] in ("per-page", "paired"):
+        defaults["layout"] = cfg["layout"]
+    if "system_mode" in cfg and cfg["system_mode"] in ("both", "vendor",
+                                                       "legacy"):
+        defaults["system_mode"] = cfg["system_mode"]
+    if "wlan_total_unit" in cfg:
+        unit = cfg["wlan_total_unit"].lower()
+        if unit in ("auto", "kb", "mb", "gb", "tb"):
+            defaults["wlan_total_unit"] = unit
+    if "card_order" in cfg:
+        order = _as_list(cfg["card_order"])
+        if order:
+            defaults["card_order"] = ",".join(order)
+    if "disks" in cfg:
+        disks = _as_list(cfg["disks"])
+        defaults["disks"] = disks or None
+    if "ifaces" in cfg:
+        ifaces = _as_list(cfg["ifaces"])
+        defaults["ifaces"] = ifaces or None
+
+    defaults["lean"] = _as_bool(cfg.get("lean"), True)
+    defaults["allow_hibernate"] = _as_bool(cfg.get("allow_hibernate"), False)
+    defaults["no_gpu"] = _as_bool(cfg.get("gpu"), True) is False
+    defaults["no_igpu"] = not _as_bool(cfg.get("gpu_igpu"), True)
+    defaults["no_dgpu"] = not _as_bool(cfg.get("gpu_dgpu"), True)
+    defaults["no_nvidia_smi"] = not _as_bool(cfg.get("nvidia_smi"), True)
+    defaults["no_hwmon_temp"] = not _as_bool(cfg.get("temp_hwmon"), True)
+    defaults["no_smartctl_temp"] = not _as_bool(cfg.get("temp_smartctl"), True)
+    defaults["no_disksini_temp"] = not _as_bool(cfg.get("temp_disksini"), True)
+    defaults["wake_disks"] = _as_bool(cfg.get("wake_disks"), False)
+    defaults["verbose"] = _as_bool(cfg.get("log_verbose"), False)
+    return defaults
+
+
+def _cadence_of(args):
+    """Per-tier refresh cadence in frames, from the CLI overrides."""
+    cadence = dict(DEFAULT_CADENCE)
+    for tier, option in (("fast", "every_fast"), ("medium", "every_medium"),
+                         ("slow", "every_slow"), ("static", "every_static")):
+        value = getattr(args, option, None)
+        if value is not None:
+            cadence[tier] = max(1, int(value))
+    return cadence
 
 
 def _run_pace(args):
@@ -2920,6 +3143,26 @@ def build_parser():
                              "shape that gives every slot its own values); "
                              "paired: the vendor's two blocks per page, where "
                              "the second slot always mirrors the first")
+    parser.add_argument("--config", default=CONFIG_PATH_DEFAULT, metavar="PATH",
+                        help="INI settings file (default "
+                             "%s); command-line options override it"
+                             % CONFIG_PATH_DEFAULT)
+    parser.add_argument("--no-igpu", action="store_true",
+                        help="do not report an integrated GPU")
+    parser.add_argument("--no-dgpu", action="store_true",
+                        help="do not report a discrete GPU")
+    parser.add_argument("--no-nvidia-smi", action="store_true",
+                        help="never call nvidia-smi (NVIDIA cards then have "
+                             "no readings)")
+    parser.add_argument("--no-hwmon-temp", action="store_true",
+                        help="skip the hwmon tier when reading disk temps")
+    parser.add_argument("--no-smartctl-temp", action="store_true",
+                        help="skip the smartctl tier when reading disk temps")
+    parser.add_argument("--no-disksini-temp", action="store_true",
+                        help="skip the disks.ini fallback for disk temps")
+    parser.add_argument("--wake-disks", action="store_true",
+                        help="let smartctl spin a sleeping disk up for its "
+                             "temperature (default: never wake disks)")
     parser.add_argument("--no-gpu", action="store_true",
                         help="skip GPU probing entirely (no nvidia-smi, no GPU "
                              "cards)")
@@ -2937,6 +3180,18 @@ def build_parser():
                         help="adapter slots to fill (default 3, the panel's "
                              "reserved count; unused slots are zeroed so a "
                              "stale duplicate cannot survive)")
+    parser.add_argument("--every-fast", type=int, default=None, metavar="N",
+                        help="send usage/temperature/fan/link speed every N "
+                             "frames (default 1)")
+    parser.add_argument("--every-medium", type=int, default=None, metavar="N",
+                        help="send time and adapter rows every N frames "
+                             "(default 2)")
+    parser.add_argument("--every-slow", type=int, default=None, metavar="N",
+                        help="send disk usage/temperature and cumulative "
+                             "traffic every N frames (default 4)")
+    parser.add_argument("--every-static", type=int, default=None, metavar="N",
+                        help="send home/mode/info/online flag every N frames "
+                             "(default 12)")
     parser.add_argument("--no-lean", dest="lean", action="store_false",
                         help="run: re-send the static pages (home, mode, info, "
                              "wlan user) on every frame instead of every 12th")
@@ -3066,6 +3321,9 @@ def cmd_temps(args):
 def main(argv=None):
     global _VERBOSE
     parser = build_parser()
+    overrides = _config_defaults(_config_path_from_argv(argv))
+    if overrides:
+        parser.set_defaults(**overrides)
     args = parser.parse_args(argv)
     if args.interval <= 0:
         parser.error("--interval must be greater than 0")

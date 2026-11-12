@@ -20,44 +20,52 @@
 | `PROTOCOL.md` | 逆向出的完整 USB 协议说明 + 实机验证记录 |
 | `subscreen_protocol.py` | 协议实现 + 自检，可单独运行 |
 | `subscreen_daemon.py` | Unraid/Linux 守护进程（usbfs，无第三方依赖） |
-| `install-unraid.sh` | Unraid 安装/卸载脚本 |
+| `plugin/` | Unraid 插件（`.plg`、`.txz` 构建脚本、设置页） |
+| `docs/PLUGIN-PLAN.md` | 插件化的设计与取舍记录 |
 
-## Unraid 快速开始
+## Unraid 安装（插件）
 
-要求：Unraid 6.12+，x86_64，root 权限，屏幕的 USB 线插在 Unraid 主机上。
+### 前置条件
 
-```sh
-# 1. 把整个目录放到 Unraid（例如 /boot/config/plugins/subscreen）
-# 2. 先探测设备
-python3 /boot/config/plugins/subscreen/subscreen_daemon.py probe
+**Python 3.7+**。Unraid 基础系统**不自带 Python**（6.12–7.4 的包清单里都没有），需要先准备一个来源：
 
-# 3. 协议与采集自检（不需要连接屏幕）
-python3 /boot/config/plugins/subscreen/subscreen_daemon.py selftest
+- NerdTools（已归档，但仍在用，常见 python3 3.9）
+- 「Python 3 for UNRAID」插件（CA 已标 Deprecated，EOL 2026-11-30）
+- 或自行 `installpkg` 一个 Slackware 的 `python3` 包
 
-# 4. 试发一轮数据，观察屏幕是否刷新（默认 3 帧，跑完等几秒看屏幕）
-python3 /boot/config/plugins/subscreen/subscreen_daemon.py once
+插件不捆绑运行时：缺 Python 时插件能装上，但守护进程不会启动，设置页会红字提示。
 
-# 5. 前台常驻，确认稳定（约 22 秒刷新一帧）
-python3 /boot/config/plugins/subscreen/subscreen_daemon.py run
+### 安装
 
-# 6. 安装为开机自启
-sh /boot/config/plugins/subscreen/install-unraid.sh install
-```
+1. 复制 `.plg` 地址：
+   `https://raw.githubusercontent.com/tevenfeng/mnasx1_unraid_subscreen/main/plugin/mnasx1-subscreen.plg`
+2. Unraid → **Plugins → Install Plugin** → 粘贴地址 → Install
+3. 打开 **Settings → 屏幕驱动 / Panel**，确认状态区显示「运行中」、Python 正常
 
-安装脚本会：
+插件会：
 
-- 把两个 Python 文件复制到 `/boot/config/plugins/subscreen/`
-- 在 `/boot/config/plugins/subscreen/rc.subscreen` 生成**持久化**的启动脚本（重启后仍存在），并复制一份到 `/etc/rc.d/rc.subscreen` 方便手动使用
-- 在 `/boot/config/go` 末尾追加一行 `sh /boot/config/plugins/subscreen/rc.subscreen start`（幂等，不会重复追加）
-- 立即启动服务
+- 把程序装到 `/usr/local/lib/mnasx1-subscreen/`、页面装到 `/usr/local/emhttp/plugins/mnasx1-subscreen/`（内存盘，重启后由 payload 重建）
+- 把设置保存在 `/boot/config/plugins/mnasx1-subscreen/mnasx1-subscreen.cfg`（U 盘，重启不丢）
+- 每次开机由 `rc.local` 自动重装 payload；阵列挂载完成后由 `event/started` 启动守护进程，停止阵列时由 `event/stopping` 停掉
+- 安装时清理旧版手工安装留下的 `/boot/config/go` 启动行与 `/etc/rc.d/rc.subscreen`
 
-> Unraid 的 `/etc` 是 tmpfs，重启会消失；因此开机启动项必须指向 `/boot` 下的持久化脚本。安装脚本已经这样处理。
+卸载：**Plugins → 卸载**。配置目录会保留（重装即恢复），要彻底删除请手动 `rm -rf /boot/config/plugins/mnasx1-subscreen`。
 
-卸载：
+> 旧的 `install-unraid.sh` 已删除。它与插件版互斥（会争抢 USB 端口），插件安装时会自动清理它的痕迹。
 
-```sh
-sh /boot/config/plugins/subscreen/install-unraid.sh uninstall
-```
+## 设置页（Settings → 屏幕驱动 / Panel）
+
+页面为**中英双语**，不依赖 WebGUI 的语言设置。分区：
+
+| 分区 | 内容 |
+|---|---|
+| 状态 | 守护进程、Python、插件版本、配置路径、最近 6 行日志；启动/停止/重启/推送一帧/复位 USB/下载诊断 |
+| 刷新节奏 | `pace` 与四档帧间隔（实时值 / 时间网卡 / 磁盘流量 / 静态页），并说明低于 1.0 秒会卡死面板 |
+| 显示内容 | 版式、卡片数量、网卡槽位、累计流量单位、四张卡的槽位顺序、数值通道（both/vendor/legacy） |
+| 数据源 | 磁盘与网卡勾选（或自动发现）、GPU 开关、`nvidia-smi`、三级温度来源、允许唤醒休眠盘、详细日志 |
+| 面板按键 | 休眠键是否真的执行 `shutdown -h now`（默认关） |
+
+保存即重启守护进程（中断约 2 秒）。配置原子写入（临时文件 + `mv`），断电不会写坏。
 
 ## 常用命令
 
@@ -82,7 +90,8 @@ python3 subscreen_daemon.py pattern          # 每格发一个独占数字，核
 | 开关 | 作用 |
 |---|---|
 | `--pace SECONDS` | `run` 每包间隔，默认 `1.5`（真机验证不会卡死的最快值） |
-| `--no-lean` | 每帧都发全部页面；默认静态页每 12 帧、磁盘页每 4 帧才重发 |
+| `--every-fast/medium/slow/static N` | 各层级每 N 帧发一次（默认 1/2/4/12） |
+| `--no-lean` | 每帧都发全部页面（关闭分层节奏） |
 | `--layout per-page\|paired` | SystemPage 版式，默认 `per-page`（一页一张卡） |
 | `--syscount N` | 屏幕画几张卡，默认有独显 4、无独显 3 |
 | `--card-order mem,cpu,dgpu,igpu` | 调整 SystemPage 槽位顺序 |
@@ -111,15 +120,20 @@ python3 subscreen_daemon.py pattern          # 每格发一个独占数字，核
 因此：
 
 - `run` 默认 `--pace 1.5`，即每包间隔 1.5 秒。这是真机验证过不卡死的最快值。
-- 一帧包数决定刷新周期，而包数随磁盘/网卡数量增长。以 5 块盘、1 个网卡、双 GPU 的机器为例（每包 1.5 秒）：
+- 各类数据的真实变化速度差得很远，所以按“层级”分别定节奏，把有限的带宽优先留给实时值：
 
-  | 帧类型 | 包数 | 周期 |
+  | 层级 | 内容 | 默认节奏 |
   |---|---|---|
-  | 完整帧（静态页 + 磁盘 + 实时值） | 31 | 46 秒 |
-  | 带磁盘的精简帧（默认每 4 帧一次） | 24 | 36 秒 |
-  | 纯实时精简帧（默认帧） | 16 | 24 秒 |
+  | fast | 占用率、温度、风速、网速（`0x10` `0x11` `0x62`） | 每帧 |
+  | medium | 时间页、网卡行（名称/IP）（`0x01` `0x60`） | 每 2 帧 |
+  | slow | 磁盘用量/温度、累计流量（`0x50` `0x51` `0x64`） | 每 4 帧 |
+  | static | 首页、模式页、信息页、在线标志、空网卡槽位（`0x00` `0x61` `0x65` `0x70` `0xA0`） | 每 12 帧 |
 
-  磁盘页温度几分钟才变一次，因此走更慢的节奏（每 4 帧），实时值（时间/系统/网卡）每帧都发。
+  以 5 块盘、1 个网卡、双 GPU 的机器为例（每包 1.5 秒）：完整帧 31 包 = 46 秒，之后多数帧只有
+  **9 包 = 14 秒**（4 张卡的页面 + 4 个 `0x11` + 1 个网速），12 帧平均 15.4 包。
+
+  节奏可逐个调整：`--every-fast` / `--every-medium` / `--every-slow` / `--every-static`（单位是帧）。
+  例如 `--every-slow 8 --every-static 24` 让磁盘与静态页更省带宽。
 - 想更快只能降 pace，而且必须逐档验证：`--pace 1.0`、`--pace 0.7`。一旦出现卡顿/按键失效，立刻退回上一个值。
 
 `--safe` 是厂商逐字节复刻档：`paired` 版式、页面块只发占位值、3 张卡。用于排除“内容”因素，只剩节奏变量。
@@ -204,7 +218,7 @@ python3 subscreen_daemon.py listen --seconds 6          # 只读不发，区分�
 4. 找 bulk OUT（优先 `0x02`）/ bulk IN（优先 `0x81`）
 5. 按 `--pace` 逐包写入整套页面
 6. 后台线程读取面板按键/翻页/状态帧
-7. 静态页（Home/Mode/InfoPage/WLANUser）只在启动和每 12 帧补发，磁盘页每 4 帧补发
+7. 按层级节流：实时值每帧、时间/网卡行每 2 帧、磁盘与累计流量每 4 帧、静态页每 12 帧
 
 ioctl 用 `fcntl.ioctl` 发起。`usbdevfs_bulktransfer` 结构体里带一个裸指针，所以需要一块可寻址的缓冲区：daemon 映射一页 tmpfs 文件，从 `/proc/self/maps` 按 device+inode 查出映射地址后立即 unlink，把地址填进结构体交给内核。
 
@@ -255,7 +269,7 @@ python3 subscreen_daemon.py probe --verbose
 
 ## 验证状态
 
-- 协议层：已通过逆向程序内置自检逻辑交叉验证；`subscreen_protocol.py` 自检覆盖全部 21 种包的长度/aim/checksum，`tests/` 下有 186 项测试，全部通过。
+- 协议层：已通过逆向程序内置自检逻辑交叉验证；`subscreen_protocol.py` 自检覆盖全部 21 种包的长度/aim/checksum，`tests/` 下有 203 项测试，全部通过。
 - **已在真实 Unraid + 屏幕硬件上验证**：
   - 设备枚举、claim 接口、bulk 端点 `0x02/0x81`、无 ctypes 的 usbfs 链路；
   - 时间页（UTC 偏移修正后与本地时间一致）、磁盘容量 GB 基准、网卡累计流量自动缩放（屏幕显示 `7GB`）；
