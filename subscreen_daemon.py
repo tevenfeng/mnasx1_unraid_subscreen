@@ -699,6 +699,13 @@ DEFAULT_CADENCE = {
     TIER_STATIC: 12,
 }
 
+# Extra packets per frame the visible page may borrow ahead of its cadence.
+# The panel drains ~3 packets a second, so the borrowed amount must stay a
+# small top-up over the baseline frame, not a second full frame: raise it one
+# step at a time on hardware and watch for freezes.
+PAGE_BURST_DEFAULT = 4
+PAGE_BURST_MAX = 8
+
 AIM_TIER = {
     0x00: TIER_STATIC,   # home page
     0x01: TIER_MEDIUM,   # time
@@ -722,6 +729,30 @@ SLOW_AIMS = frozenset(aim for aim, tier in AIM_TIER.items()
                       if tier == TIER_SLOW)
 LEAN_FULL_EVERY = DEFAULT_CADENCE[TIER_STATIC]
 LEAN_SLOW_EVERY = DEFAULT_CADENCE[TIER_SLOW]
+
+# Which visible page each aim draws into. The panel reports the page the user
+# switched to (cmd=0x03, aim=page code), so those packets can be moved ahead of
+# the cadence right after a switch. Aims with no page of their own stay out of
+# the promotion: the clock is drawn on every page, the mode page and the online
+# flag are constant, and the zeroed padding slots belong to no page at all.
+# The cmd=0x02 six-byte status frame is deliberately NOT the page source: its
+# page code (0x0A observed) is render state with unverified semantics, while
+# the event codes map 1:1 onto EVENT_PAGES.
+AIM_PAGE = {
+    0x00: 0x00,   # home page
+    0x01: None,   # time is drawn on every page
+    0x10: 0x10,   # system page
+    0x11: 0x10,   # system item card
+    0x50: 0x50,   # disk page
+    0x51: 0x50,   # disk item card
+    0x60: 0x60,   # adapter row (name, IP, speed)
+    0x61: None,   # adapter online flag: constant content
+    0x62: 0x60,   # adapter speed
+    0x64: 0x60,   # adapter cumulative traffic
+    0x65: 0x60,   # adapter IP
+    0x70: None,   # mode page
+    0xA0: 0xA0,   # info pages
+}
 
 
 def _is_blank_adapter(packet):
@@ -759,6 +790,83 @@ def _lean_frame(packets, full, slow=False, passes=1, cadence=None):
         if every <= 1 or passes % every == 0:
             needed.append(packet)
     return needed
+
+
+def _page_of(packet):
+    """The visible page a packet draws into, or None if it belongs to none."""
+    if _is_blank_adapter(packet):
+        return None
+    return AIM_PAGE.get(packet[5])
+
+
+def _slot_key(packet):
+    """Identify the panel slot a packet draws into: aim + order/id byte.
+
+    Values inside a packet change between frames; the slot it fills does not.
+    A deferred slot is therefore remembered by its key and re-issued with
+    whatever the current snapshot holds, instead of the stale bytes that were
+    pushed aside.
+    """
+    return (packet[5], packet[6] if len(packet) > 6 else 0)
+
+
+def _promoted_extra(packets, base, visible, catch_up):
+    """Visible-page packets the plain cadence does not send on this pass.
+
+    Live values (usage, disk usage, traffic, adapter rows) are wanted every
+    frame while their page is visible; static content (home banner, info
+    names, adapter IP) is wanted only on the frame right after a page switch,
+    when `catch_up` is set.
+    """
+    covered = {_slot_key(packet) for packet in base}
+    extra = []
+    for packet in packets:
+        if _page_of(packet) != visible:
+            continue
+        key = _slot_key(packet)
+        if key in covered:
+            continue
+        if _tier_of(packet) == TIER_STATIC and not catch_up:
+            continue
+        extra.append(packet)
+        covered.add(key)
+    return extra
+
+
+def _apply_page_priority(packets, base, visible, catch_up, budget, pending):
+    """Push the visible page ahead of the cadence, at most `budget` extra/frame.
+
+    `pending` holds panel slots deferred by earlier frames; they queue first,
+    with their current values, so a burst that does not fit in one frame
+    rotates instead of starving the packets pushed aside last time. Slots of a
+    page the user has left are dropped. Returns (frame, still_pending).
+
+    The baseline frame is never enlarged beyond `budget` packets, so the
+    panel's drain rate is not exceeded: the switch buys freshness for the
+    visible page, not a faster overall feed.
+    """
+    burst = max(1, int(budget))
+    covered = {_slot_key(packet) for packet in base}
+    queue = []
+    queued = set()
+    for key in pending:
+        if key in covered or key in queued:
+            continue
+        packet = next((candidate for candidate in packets
+                       if _slot_key(candidate) == key
+                       and _page_of(candidate) == visible), None)
+        if packet is None:
+            continue
+        queue.append(packet)
+        queued.add(key)
+    for packet in _promoted_extra(packets, base, visible, catch_up):
+        key = _slot_key(packet)
+        if key in queued:
+            continue
+        queue.append(packet)
+        queued.add(key)
+    return (base + queue[:burst],
+            [_slot_key(packet) for packet in queue[burst:]])
 
 
 @dataclass
@@ -2127,6 +2235,13 @@ def _handle_incoming(info, args, state):
         if aim in proto.EVENT_PAGES:
             _log("panel: page select 0x%02X (%s)%s"
                  % (aim, PAGE_NAMES.get(aim, "unknown"), crc_note))
+            # Only a change of page re-arms the catch-up pass: the panel may
+            # repeat the same code, and re-promoting on every repeat would
+            # re-send static content the user is already looking at.
+            if state.get("visible_page") != aim:
+                state["visible_page"] = aim
+                state["page_catch_up"] = True
+                state["page_pending"] = []
         elif aim == proto.EVENT_MUTE:
             _log("panel: mute button%s" % crc_note)
         elif aim == proto.EVENT_PERFORMANCE:
@@ -2364,7 +2479,10 @@ def cmd_run(args):
         _log("stopped")
         return 0
 
-    state = {"hibernate_issued": False}
+    state = {"hibernate_issued": False,
+             "visible_page": None,
+             "page_catch_up": False,
+             "page_pending": []}
     last_error = None
     last_error_log = 0.0
 
@@ -2388,6 +2506,9 @@ def cmd_run(args):
              % (info["node"], info["busnum"], info["devnum"],
                 info["interface"],
                 info["out_ep"] or 0, info["in_ep"] or 0))
+        # A reconnect may have left the panel without its retained content;
+        # arm one catch-up pass so the page the user is on gets redrawn.
+        state["page_catch_up"] = True
 
         reader_stop = threading.Event()
         reader = threading.Thread(
@@ -2409,13 +2530,30 @@ def cmd_run(args):
                     stop_event.wait(args.interval)
                     continue
                 passes += 1
-                if getattr(args, "lean", True):
-                    cadence = _cadence_of(args)
-                    # The first frame (and every static period after it) sends
-                    # everything, so a fresh or reset panel is fully populated.
-                    full = (passes - 1) % cadence[TIER_STATIC] == 0
-                    packets = _lean_frame(packets, full, passes=passes,
-                                          cadence=cadence)
+                cadence = _cadence_of(args)
+                # The first frame (and every static period after it) sends
+                # everything, so a fresh or reset panel is fully populated.
+                full = (passes - 1) % cadence[TIER_STATIC] == 0
+                lean = getattr(args, "lean", True)
+                base = (_lean_frame(packets, False, passes=passes,
+                                    cadence=cadence)
+                        if lean and not full else packets)
+                if full:
+                    # Everything went out: nothing to catch up or defer.
+                    state["page_pending"] = []
+                    state["page_catch_up"] = False
+                    packets = base
+                elif (lean and getattr(args, "page_priority", True)
+                      and state.get("visible_page") is not None):
+                    packets, state["page_pending"] = _apply_page_priority(
+                        packets, base, state["visible_page"],
+                        state["page_catch_up"],
+                        getattr(args, "page_burst", PAGE_BURST_DEFAULT),
+                        state["page_pending"])
+                    state["page_catch_up"] = False
+                else:
+                    packets = base
+                    state["page_pending"] = []
                 try:
                     _write_frame(transport, packets, _run_pace(args),
                                  progress=True)
@@ -2532,6 +2670,7 @@ def _config_defaults(path):
     take("every_medium", "every_medium", int, 1, 60)
     take("every_slow", "every_slow", int, 1, 60)
     take("every_static", "every_static", int, 1, 60)
+    take("page_burst", "page_burst", int, 1, PAGE_BURST_MAX)
     take("wlan_slots", "wlan_slots", int, 1, 3)
     take("syscount", "syscount", lambda v: None if str(v).lower() == "auto"
          else int(v), None, None)
@@ -2557,6 +2696,7 @@ def _config_defaults(path):
         defaults["ifaces"] = ifaces or None
 
     defaults["lean"] = _as_bool(cfg.get("lean"), True)
+    defaults["page_priority"] = _as_bool(cfg.get("page_priority"), True)
     defaults["allow_hibernate"] = _as_bool(cfg.get("allow_hibernate"), False)
     defaults["no_gpu"] = _as_bool(cfg.get("gpu"), True) is False
     defaults["no_igpu"] = not _as_bool(cfg.get("gpu_igpu"), True)
@@ -3195,6 +3335,19 @@ def build_parser():
     parser.add_argument("--no-lean", dest="lean", action="store_false",
                         help="run: re-send the static pages (home, mode, info, "
                              "wlan user) on every frame instead of every 12th")
+    parser.add_argument("--no-page-priority", dest="page_priority",
+                        action="store_false",
+                        help="run: do not push the visible page's packets ahead "
+                             "of the cadence after a page-select event "
+                             "(default: push them, up to --page-burst extra "
+                             "packets per frame)")
+    parser.add_argument("--page-burst", type=int,
+                        default=PAGE_BURST_DEFAULT, metavar="N",
+                        help="run: extra packets per frame for the visible page "
+                             "(default %d, max %d; the panel drains ~3 packets "
+                             "a second, so raise it one step at a time and "
+                             "watch for freezes)"
+                             % (PAGE_BURST_DEFAULT, PAGE_BURST_MAX))
     parser.add_argument("--pace", type=float, default=None, metavar="SECONDS",
                         help="run: seconds between packets (default 0.3, which "
                              "matches the panel's own drain rate; a faster "

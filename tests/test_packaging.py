@@ -94,6 +94,63 @@ class HandlerTest(unittest.TestCase):
                 self.assertTrue(os.access(path, os.X_OK), name + " not 0755")
 
 
+class ConfigKeyCoverageTest(unittest.TestCase):
+    """A key added to subsys_defaults() must reach all three places.
+
+    lib.php holds the defaults, handle.php validates them on save, default.cfg
+    seeds fresh installs and the page renders the controls. Adding a key to
+    only some of those is exactly the kind of drift that silently strands a
+    setting (the daemon reads a key the page can never change, or restarts
+    without one the config file lacks), so the three lists are tied together.
+    """
+
+    def _default_keys(self):
+        with open(os.path.join(PLUGIN_SRC, "include", "lib.php"),
+                  encoding="utf-8") as handle:
+            body = handle.read()
+        block = re.search(r"function subsys_defaults\(\): array\s*\{(.*?)\n    \]",
+                          body, re.S)
+        self.assertIsNotNone(block, "subsys_defaults() shape changed")
+        keys = re.findall(r"'([a-z_]+)'\s*=>", block.group(1))
+        self.assertGreater(len(keys), 10, "regex matched nothing useful")
+        return keys
+
+    def test_every_default_key_is_written_by_the_save_path(self):
+        with open(os.path.join(PLUGIN_SRC, "include", "handle.php"),
+                  encoding="utf-8") as handle:
+            source = handle.read()
+        # Look only at the save branch. Keys written through the toggle
+        # foreach ($values[$key]) are named inside its key list, so a quoted
+        # occurrence counts — a key nobody ever mentions in the save branch
+        # cannot end up in the config file.
+        save = source.split("$action !== 'save'", 1)[-1]
+        for key in self._default_keys():
+            present = ("$values['%s']" % key in source
+                       or "'%s'" % key in save)
+            self.assertTrue(present, "%s is never saved by handle.php" % key)
+
+    def test_every_default_key_is_seeded_in_default_cfg(self):
+        with open(os.path.join(PLUGIN_SRC, "default.cfg"),
+                  encoding="utf-8") as handle:
+            cfg = handle.read()
+        for key in self._default_keys():
+            self.assertRegex(cfg, r"(?m)^%s=" % key,
+                             "%s missing from default.cfg" % key)
+
+    def test_every_default_key_is_visible_on_the_page(self):
+        _, text = page_header()
+        for key in self._default_keys():
+            # A key is on the page when it has its own control, is posted as
+            # an array (disks[]/ifaces[]), is read through $cfg (card_order),
+            # or is a row of the toggle loop (rendered as name="<?=...?>").
+            present = ('name="%s"' % key in text
+                       or 'name="%s[]"' % key in text
+                       or "$cfg['%s']" % key in text
+                       or "'%s'," % key in text)
+            self.assertTrue(present,
+                            "%s has no control or reader on the page" % key)
+
+
 class PluginDescriptorTest(unittest.TestCase):
     def _descriptor(self):
         path = os.path.join(ROOT, "plugin", "mnasx1-subscreen.plg")

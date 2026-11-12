@@ -92,6 +92,8 @@ python3 subscreen_daemon.py pattern          # 每格发一个独占数字，核
 | `--pace SECONDS` | `run` 每包间隔，默认 `1.5`（真机验证不会卡死的最快值） |
 | `--every-fast/medium/slow/static N` | 各层级每 N 帧发一次（默认 1/2/4/12） |
 | `--no-lean` | 每帧都发全部页面（关闭分层节奏） |
+| `--page-burst N` | 切页后可见页每帧最多借用的补发包数，默认 4（范围 1–8，调大请逐档实测） |
+| `--no-page-priority` | 关闭可见页优先，回到纯四层节奏（页面切换不再影响发送顺序） |
 | `--layout per-page\|paired` | SystemPage 版式，默认 `per-page`（一页一张卡） |
 | `--syscount N` | 屏幕画几张卡，默认有独显 4、无独显 3 |
 | `--card-order mem,cpu,dgpu,igpu` | 调整 SystemPage 槽位顺序 |
@@ -134,6 +136,13 @@ python3 subscreen_daemon.py pattern          # 每格发一个独占数字，核
 
   节奏可逐个调整：`--every-fast` / `--every-medium` / `--every-slow` / `--every-static`（单位是帧）。
   例如 `--every-slow 8 --every-static 24` 让磁盘与静态页更省带宽。
+
+  **可见页优先**（默认开启，`--no-page-priority` 关闭）：面板切页时会发 `cmd=3` 事件，守护进程因此知道用户正在看哪一页。
+  当前页里还没到节奏的包，每帧最多借用 `--page-burst`（默认 4，范围 1–8）个包位补发；没挤进本帧的下一帧
+  **按最新值**重发（队列只记槽位 `aim+id`，不存旧字节），已切走的页自动丢弃。包间隔不变，每帧上限受控：
+  实测 5 盘、双 GPU 的机器上，无优先 12 帧平均 15.4 包，磁盘页可见 + burst 4 平均 18.1 包、峰值 16 包，
+  远低于该节奏下已验证安全的完整帧 31 包。首页/信息页只在切页那一帧补发一次；系统页本来就是每帧，优先不花额外包。
+  调大 burst 请逐档实测（4 → 6），按键一旦迟钝就退回（见下方卡死急救）。
 - 想更快只能降 pace，而且必须逐档验证：`--pace 1.0`、`--pace 0.7`。一旦出现卡顿/按键失效，立刻退回上一个值。
 
 `--safe` 是厂商逐字节复刻档：`paired` 版式、页面块只发占位值、3 张卡。用于排除“内容”因素，只剩节奏变量。
@@ -269,7 +278,7 @@ python3 subscreen_daemon.py probe --verbose
 
 ## 验证状态
 
-- 协议层：已通过逆向程序内置自检逻辑交叉验证；`subscreen_protocol.py` 自检覆盖全部 21 种包的长度/aim/checksum，`tests/` 下有 203 项测试，全部通过。
+- 协议层：已通过逆向程序内置自检逻辑交叉验证；`subscreen_protocol.py` 自检覆盖全部 21 种包的长度/aim/checksum，`tests/` 下有 233 项测试，全部通过。
 - **已在真实 Unraid + 屏幕硬件上验证**：
   - 设备枚举、claim 接口、bulk 端点 `0x02/0x81`、无 ctypes 的 usbfs 链路；
   - 时间页（UTC 偏移修正后与本地时间一致）、磁盘容量 GB 基准、网卡累计流量自动缩放（屏幕显示 `7GB`）；
@@ -281,6 +290,7 @@ python3 subscreen_daemon.py probe --verbose
 - **仍在确认中**：
   - `--layout per-page`（一页一张卡）在 1.5 秒节奏下四张卡各自独立、不卡死；
   - 3 个网卡槽位补齐后空槽在屏幕上的呈现；
-  - 累计流量的 unit 字节是否真被固件用于换算后缀（`--wlan-total-unit` 可对照）。
+  - 累计流量的 unit 字节是否真被固件用于换算后缀（`--wlan-total-unit` 可对照）；
+  - 可见页优先的真机表现：切页识别（`cmd=3`）与补发包是否影响按键（先 burst 4 逐档验证，再试更大值）。
 - 宿主机采集：CPU/内存/磁盘/网卡/IP/GPU/温度采集已在本机与目标机实际运行通过；`dump --mock` 可打印完整包序列。
 - 安装脚本：在沙箱中模拟 `/boot`、`/etc` 路径，验证了安装、重复安装幂等、重启后从持久化 rc 启动、停止与卸载流程。

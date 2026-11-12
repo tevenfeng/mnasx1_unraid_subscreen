@@ -19,6 +19,8 @@ function subsys_defaults(): array
         'every_medium' => '2',
         'every_slow' => '4',
         'every_static' => '12',
+        'page_priority' => '1',
+        'page_burst' => '4',
         'layout' => 'per-page',
         'syscount' => 'auto',
         'card_order' => 'cpu,igpu,mem,dgpu',

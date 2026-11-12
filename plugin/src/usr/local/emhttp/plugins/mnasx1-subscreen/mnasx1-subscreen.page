@@ -137,10 +137,22 @@ $labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'd
       <input id="every_static" type="number" name="every_static" min="1" max="60"
              value="<?=subsys_h($cfg['every_static'])?>">
     </div>
+    <div class="subsys-row">
+      <label>可见页优先 / Prioritise visible page</label>
+      <input type="hidden" name="page_priority" value="0">
+      <input type="checkbox" name="page_priority" value="1" <?=$cfg['page_priority'] === '1' ? 'checked' : ''?>>
+    </div>
+    <div class="subsys-row">
+      <label for="page_burst">每帧额外包数 / Extra packets per frame</label>
+      <input id="page_burst" type="number" name="page_burst" min="1" max="8"
+             value="<?=subsys_h($cfg['page_burst'])?>">
+    </div>
   </div>
   <p class="subsys-hint">
     每包等待时间。实测低于 1.0 秒会积压并让面板卡死（按键也失效），0.5 是下限而不是建议值。<br>
-    Time between packets. Below 1.0 s the panel builds a backlog, freezes and stops taking input.
+    Time between packets. Below 1.0 s the panel builds a backlog, freezes and stops taking input.<br>
+    可见页优先：切页后当前页的数据立刻补发（每帧最多借用上面 N 个包位），其余页只是更新变慢，不会白屏。调大数字请逐档验证面板不卡。<br>
+    Visible-page priority: after a page switch the shown page gets its fresh values first, borrowing up to N extra slots per frame; other pages only refresh slower. Raise the number one step at a time and confirm the panel stays responsive.
   </p>
 </div>
 

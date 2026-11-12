@@ -77,6 +77,8 @@ function subsys_handle_post(): array
     $values['every_medium'] = subsys_clamp_int(subsys_post('every_medium'), 1, 60, $defaults['every_medium']);
     $values['every_slow'] = subsys_clamp_int(subsys_post('every_slow'), 1, 60, $defaults['every_slow']);
     $values['every_static'] = subsys_clamp_int(subsys_post('every_static'), 1, 60, $defaults['every_static']);
+    $values['page_priority'] = subsys_on_off('page_priority', $defaults['page_priority']);
+    $values['page_burst'] = subsys_clamp_int(subsys_post('page_burst'), 1, 8, $defaults['page_burst']);
 
     $values['layout'] = subsys_pick(subsys_post('layout'), ['per-page', 'paired'], $defaults['layout']);
     $values['syscount'] = subsys_pick(subsys_post('syscount', 'auto'), ['auto', '3', '4'], 'auto');

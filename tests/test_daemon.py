@@ -1614,6 +1614,157 @@ class LeanFrameTest(unittest.TestCase):
         self.assertEqual(daemon.LEAN_SLOW_EVERY, 4)
 
 
+class PagePriorityTest(unittest.TestCase):
+    """The page the user is looking at gets its values refreshed first."""
+
+    def _packets(self, disk_temp=33):
+        from subscreen_protocol import PacketBuilder, DiskItem, build_full_sequence
+        snapshot = daemon._pattern_snapshot()
+        if disk_temp != 33:
+            snapshot.disks = [DiskItem(0, 111, 222, disk_temp, "DISK")]
+        return build_full_sequence(snapshot, PacketBuilder(0))
+
+    def _base(self, packets, passes=1):
+        return daemon._lean_frame(packets, False, passes=passes,
+                                  cadence=daemon.DEFAULT_CADENCE)
+
+    def test_visible_system_page_adds_nothing(self):
+        # System cards ride the fast tier: already in every baseline frame.
+        packets = self._packets()
+        base = self._base(packets)
+        frame, pending = daemon._apply_page_priority(
+            packets, base, 0x10, True, daemon.PAGE_BURST_MAX, [])
+        self.assertEqual(frame, base)
+        self.assertEqual(pending, [])
+
+    def test_visible_disk_page_is_promoted_when_not_due(self):
+        packets = self._packets()
+        base = self._base(packets)          # pass 1: slow tier is not due
+        disk = [p for p in packets if p[5] in (0x50, 0x51)]
+        self.assertTrue(disk)
+        frame, pending = daemon._apply_page_priority(
+            packets, base, 0x50, False, daemon.PAGE_BURST_MAX, [])
+        self.assertEqual(frame, base + disk)
+        self.assertEqual(pending, [])
+
+    def test_static_page_catches_up_only_once(self):
+        packets = self._packets()
+        base = self._base(packets)
+        info = [p for p in packets if p[5] == 0xA0]
+        self.assertTrue(info)
+        frame, pending = daemon._apply_page_priority(
+            packets, base, 0xA0, True, daemon.PAGE_BURST_MAX, [])
+        self.assertEqual(frame, base + info)
+        self.assertEqual(pending, [])
+        again, pending2 = daemon._apply_page_priority(
+            packets, base, 0xA0, False, daemon.PAGE_BURST_MAX, [])
+        self.assertEqual(again, base)
+        self.assertEqual(pending2, [])
+
+    def test_home_page_catches_up_once_on_switch(self):
+        packets = self._packets()
+        base = self._base(packets)
+        home = [p for p in packets if p[5] == 0x00]
+        frame, _pending = daemon._apply_page_priority(packets, base, 0x00,
+                                                      True, 4, [])
+        self.assertEqual(frame, base + home)
+        again, _p = daemon._apply_page_priority(packets, base, 0x00, False,
+                                                4, [])
+        self.assertEqual(again, base)
+
+    def test_blank_slots_time_mode_online_flag_are_never_promoted(self):
+        packets = self._packets()
+        base = self._base(packets)
+        self.assertTrue(any(daemon._is_blank_adapter(p) for p in packets))
+        frame, _pending = daemon._apply_page_priority(
+            packets, base, 0x60, True, daemon.PAGE_BURST_MAX, [])
+        aims = {p[5] for p in frame}
+        self.assertFalse(any(daemon._is_blank_adapter(p) for p in frame))
+        self.assertFalse(aims & {0x70, 0x61, 0x01})
+        self.assertIn(0x60, aims)   # the real adapter row rides along
+        self.assertIn(0x64, aims)   # cumulative traffic is promoted live
+        self.assertIn(0x65, aims)   # the IP rides the one-shot catch-up
+
+    def test_burst_cap_rotates_pending_with_current_values(self):
+        packets = self._packets()
+        base = self._base(packets)
+        frame1, pending = daemon._apply_page_priority(packets, base, 0x50,
+                                                      False, 1, [])
+        self.assertEqual(len(frame1), len(base) + 1)
+        self.assertTrue(pending)
+        # The disk temperature changed between the frames.
+        fresh = self._packets(disk_temp=44)
+        base_fresh = self._base(fresh)
+        frame2, pending2 = daemon._apply_page_priority(fresh, base_fresh,
+                                                       0x50, False, 1,
+                                                       pending)
+        item = next(p for p in fresh if p[5] == 0x51)
+        self.assertIn(item, frame2[len(base_fresh):])   # new value, not stale
+        self.assertEqual(len(frame2), len(base_fresh) + 1)
+        self.assertTrue(pending2)                        # the page packet waits
+
+    def test_left_page_pending_is_dropped(self):
+        packets = self._packets()
+        base = self._base(packets)
+        _frame, pending = daemon._apply_page_priority(packets, base, 0x50,
+                                                      False, 1, [])
+        self.assertTrue(pending)
+        frame2, pending2 = daemon._apply_page_priority(packets, base, 0xA0,
+                                                       False, 4, pending)
+        self.assertEqual(frame2, base)
+        self.assertEqual(pending2, [])
+
+    def test_page_flags_exist_and_default_on(self):
+        parser = daemon.build_parser()
+        args = parser.parse_args(["run"])
+        self.assertTrue(args.page_priority)
+        self.assertEqual(args.page_burst, daemon.PAGE_BURST_DEFAULT)
+        args = parser.parse_args(["run", "--no-page-priority",
+                                  "--page-burst", "6"])
+        self.assertFalse(args.page_priority)
+        self.assertEqual(args.page_burst, 6)
+
+
+class VisiblePageEventTest(unittest.TestCase):
+    """The page-select event, and only it, decides what is visible."""
+
+    def _handle(self, raw, state):
+        info = daemon.parse_packet(raw)
+        info["raw"] = raw
+        args = types.SimpleNamespace(allow_hibernate=False)
+        with mock.patch.object(daemon, "_log"):
+            daemon._handle_incoming(info, args, state)
+
+    def test_page_select_records_the_visible_page(self):
+        state = {}
+        self._handle(event_frame(0x50), state)
+        self.assertEqual(state["visible_page"], 0x50)
+        self.assertTrue(state["page_catch_up"])
+
+    def test_repeat_of_the_same_page_does_not_rearm_catch_up(self):
+        state = {}
+        self._handle(event_frame(0x50), state)
+        state["page_catch_up"] = False          # consumed by a frame
+        self._handle(event_frame(0x50), state)
+        self.assertFalse(state["page_catch_up"])
+
+    def test_switching_pages_arms_catch_up_again(self):
+        state = {}
+        self._handle(event_frame(0x50), state)
+        state["page_catch_up"] = False
+        self._handle(event_frame(0x60), state)
+        self.assertEqual(state["visible_page"], 0x60)
+        self.assertTrue(state["page_catch_up"])
+
+    def test_status_tick_does_not_move_the_visible_page(self):
+        state = {}
+        self._handle(event_frame(0x50), state)
+        state["page_catch_up"] = False
+        self._handle(bytes.fromhex("A55A2504020A"), state)
+        self.assertEqual(state["visible_page"], 0x50)
+        self.assertFalse(state["page_catch_up"])
+
+
 class NetRateSamplerTest(unittest.TestCase):
     """The displayed rate is a one-second sample, not a frame-long average."""
 
@@ -1726,6 +1877,27 @@ class ConfigFileTest(unittest.TestCase):
         self.assertTrue(defaults["no_smartctl_temp"])
         self.assertTrue(defaults["no_disksini_temp"])
         self.assertTrue(defaults["wake_disks"])
+
+    def test_page_priority_keys_roundtrip(self):
+        path = self._write("""\
+            page_priority=0
+            page_burst=20
+            """)
+        defaults = daemon._config_defaults(path)
+        self.assertIs(defaults["page_priority"], False)
+        self.assertEqual(defaults["page_burst"], daemon.PAGE_BURST_MAX)
+
+    def test_page_priority_cli_beats_the_config_file(self):
+        path = self._write("page_priority=1\npage_burst=6\n")
+        parser = daemon.build_parser()
+        parser.set_defaults(**daemon._config_defaults(path))
+        args = parser.parse_args(["run"])
+        self.assertTrue(args.page_priority)
+        self.assertEqual(args.page_burst, 6)
+        args = parser.parse_args(["run", "--no-page-priority",
+                                  "--page-burst", "2"])
+        self.assertFalse(args.page_priority)
+        self.assertEqual(args.page_burst, 2)
 
     def test_missing_file_is_harmless(self):
         self.assertEqual(daemon._config_defaults("/nonexistent/x.cfg"), {})
