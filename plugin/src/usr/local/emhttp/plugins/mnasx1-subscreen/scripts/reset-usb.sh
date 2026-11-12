@@ -2,7 +2,8 @@
 # USBDEVFS_RESET the panel's port: the first aid when the screen stops
 # responding to touches. Stop the daemon first, it holds the interface open.
 
-. /usr/local/emhttp/plugins/mnasx1-subscreen/scripts/common.sh
+DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$DIR/common.sh"
 
 if is_running; then
     echo "daemon is running; stop it before resetting the port" >&2

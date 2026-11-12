@@ -2,7 +2,8 @@
 # Start the panel daemon. Safe to call repeatedly: it is a no-op when the
 # daemon is already running. Called by event/started and by the settings page.
 
-. /usr/local/emhttp/plugins/mnasx1-subscreen/scripts/common.sh
+DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$DIR/common.sh"
 
 mkdir -p "$CONFIG_DIR"
 

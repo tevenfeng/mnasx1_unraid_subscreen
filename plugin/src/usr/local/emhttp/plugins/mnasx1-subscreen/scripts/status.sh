@@ -1,7 +1,8 @@
 #!/bin/bash
 # One-screen summary: used by the settings page and by hand.
 
-. /usr/local/emhttp/plugins/mnasx1-subscreen/scripts/common.sh
+DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$DIR/common.sh"
 
 if is_running; then
     echo "daemon: running (pid $(cat "$PIDFILE"))"

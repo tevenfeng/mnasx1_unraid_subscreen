@@ -341,8 +341,9 @@ rm -rf /usr/local/emhttp/plugins/mnasx1-subscreen /usr/local/lib/mnasx1-subscree
 |---|---|
 | 插件描述符模板 | `plugin/mnasx1-subscreen.plg.in`，构建时渲染为 `plugin/mnasx1-subscreen.plg` |
 | payload 构建 | `plugin/build.sh`（staging → `tar -cJf` → SHA256 → 渲染 `.plg`；自动把 `.plg` 复制到仓库路径） |
-| 设置页 | `plugin/src/usr/local/emhttp/plugins/mnasx1-subscreen/mnasx1-subscreen.page`（双语内联） |
-| 保存/动作/诊断 | `include/save.php`、`include/action.php`、`include/diagnose.php`、`include/lib.php` |
+| 设置页 | `plugin/src/usr/local/emhttp/plugins/mnasx1-subscreen/mnasx1-subscreen.page`（双语内联；`Menu="OtherSettings" Type="xmenu"`，在 Settings → System Settings 里是一个按钮） |
+| 保存/动作 | `include/handle.php`（页面内 POST，不跳转到独立脚本） |
+| 诊断下载 | `include/diagnose.php`、`include/lib.php` |
 | 起停脚本 | `scripts/{common,start,stop,restart,once,reset-usb,status}.sh` |
 | 事件钩子 | `event/started`、`event/stopping` |
 | 守护进程配置 | `--config` + INI 解析（CLI > 文件 > 默认），新增 8 个开关 |

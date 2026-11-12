@@ -1,17 +1,26 @@
-Menu="Settings"
+Menu="OtherSettings"
+Type="xmenu"
 Title="屏幕驱动 / Panel"
 Icon="desktop"
+Tag="desktop"
 ---
 <?php
 require_once '/usr/local/emhttp/plugins/mnasx1-subscreen/include/lib.php';
+require_once '/usr/local/emhttp/plugins/mnasx1-subscreen/include/handle.php';
+
+// Actions and saving are handled here, in the same request that renders the
+// page: a redirect to a helper script left a blank screen behind whenever a
+// warning was printed before the Location header.
+$flashLevel = '';
+$flashText = '';
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
+    [$flashLevel, $flashText] = subsys_handle_post();
+}
 
 $cfg = subsys_read_config();
 $running = subsys_daemon_running();
 $python = subsys_python();
 $pythonOk = $python !== '' && is_executable($python);
-$note = (string)($_GET['note'] ?? '');
-$error = (string)($_GET['error'] ?? '');
-$output = (string)($_GET['output'] ?? '');
 
 $disks = subsys_discover_disks();
 $ifaces = subsys_discover_ifaces();
@@ -42,14 +51,12 @@ $labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'd
   pre.subsys-log { max-height: 120px; overflow: auto; background: #f7f7f7; padding: 8px; font-size: 11px; }
 </style>
 
-<?php if ($error !== ''): ?>
-<div class="subsys-card" style="border-color:#c33">
-  <span class="subsys-bad">错误 / Error:</span> <?=subsys_h($error)?>
-</div>
-<?php elseif ($note !== ''): ?>
-<div class="subsys-card" style="border-color:#2a7">
-  <span class="subsys-ok">已保存 / Saved.</span>
-  <?php if ($output !== ''): ?><br><small><?=subsys_h($output)?></small><?php endif; ?>
+<?php if ($flashLevel !== ''): ?>
+<div class="subsys-card" style="border-color:<?=$flashLevel === 'ok' ? '#2a7' : '#c33'?>">
+  <span class="<?=$flashLevel === 'ok' ? 'subsys-ok' : 'subsys-bad'?>">
+    <?=$flashLevel === 'ok' ? '完成 / Done:' : '错误 / Error:'?>
+  </span>
+  <span style="white-space:pre-wrap"><?=subsys_h($flashText)?></span>
 </div>
 <?php endif; ?>
 
@@ -89,8 +96,8 @@ $labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'd
     <?php foreach ([['start', '启动 Start'], ['stop', '停止 Stop'],
                     ['restart', '重启 Restart'], ['once', '推送一帧 Push once'],
                     ['reset', '复位 USB Reset']] as [$cmd, $label]): ?>
-    <form method="post" action="/plugins/mnasx1-subscreen/include/action.php" style="margin:0">
-      <input type="hidden" name="action" value="<?=$cmd?>">
+    <form method="post" style="margin:0">
+      <input type="hidden" name="do" value="<?=$cmd?>">
       <button type="submit" <?=($cmd === 'start' && !$pythonOk) ? 'disabled' : ''?>><?=$label?></button>
     </form>
     <?php endforeach; ?>
@@ -99,7 +106,8 @@ $labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'd
   <p class="subsys-hint">「推送一帧」与「复位 USB」需要先停止守护进程（USB 端口只能被一个进程占用）。 / Push-once and Reset need the daemon stopped: only one process can own the USB interface.</p>
 </div>
 
-<form method="post" action="/plugins/mnasx1-subscreen/include/save.php">
+<form method="post">
+<input type="hidden" name="do" value="save">
 
 <div class="subsys-card">
   <h3>刷新节奏 / Refresh cadence</h3>

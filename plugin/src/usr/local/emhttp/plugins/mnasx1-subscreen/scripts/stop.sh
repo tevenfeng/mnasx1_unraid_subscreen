@@ -1,7 +1,8 @@
 #!/bin/bash
 # Stop the panel daemon. A no-op when it is not running.
 
-. /usr/local/emhttp/plugins/mnasx1-subscreen/scripts/common.sh
+DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$DIR/common.sh"
 
 if ! is_running; then
     rm -f "$PIDFILE"

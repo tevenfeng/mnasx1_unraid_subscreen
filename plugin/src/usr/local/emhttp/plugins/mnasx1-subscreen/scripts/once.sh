@@ -4,7 +4,8 @@
 # The daemon holds the USB interface, so this only works while it is stopped;
 # when it is running the request is refused rather than fighting over the port.
 
-. /usr/local/emhttp/plugins/mnasx1-subscreen/scripts/common.sh
+DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+. "$DIR/common.sh"
 
 if is_running; then
     echo "daemon is running and owns the USB device; stop it first" >&2

@@ -40,7 +40,7 @@
 1. 复制 `.plg` 地址：
    `https://raw.githubusercontent.com/tevenfeng/mnasx1_unraid_subscreen/main/plugin/mnasx1-subscreen.plg`
 2. Unraid → **Plugins → Install Plugin** → 粘贴地址 → Install
-3. 打开 **Settings → 屏幕驱动 / Panel**，确认状态区显示「运行中」、Python 正常
+3. 打开 **Settings → System Settings → 屏幕驱动 / Panel**，确认状态区显示「运行中」、Python 正常
 
 插件会：
 
@@ -53,7 +53,7 @@
 
 > 旧的 `install-unraid.sh` 已删除。它与插件版互斥（会争抢 USB 端口），插件安装时会自动清理它的痕迹。
 
-## 设置页（Settings → 屏幕驱动 / Panel）
+## 设置页（Settings → System Settings → 屏幕驱动 / Panel）
 
 页面为**中英双语**，不依赖 WebGUI 的语言设置。分区：
 

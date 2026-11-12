@@ -1,5 +1,6 @@
 #!/bin/bash
 # Array is mounted: disk paths under /mnt/* now exist, so start the daemon.
 # emhttp blocks until this returns, hence start.sh backgrounds the daemon.
-/usr/local/emhttp/plugins/mnasx1-subscreen/scripts/start.sh >/dev/null 2>&1 &
+DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+"$DIR/../scripts/start.sh" >/dev/null 2>&1 &
 exit 0
