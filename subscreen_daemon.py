@@ -15,6 +15,7 @@ Commands:
 """
 
 import argparse
+import copy
 import errno
 import fcntl
 import glob
@@ -2226,6 +2227,9 @@ def _handle_hibernate(args, state):
 
 
 def _handle_incoming(info, args, state):
+    # Any frame from the panel means a human touched it: wake the sender even
+    # if no displayed value changed.
+    state["wake_requested"] = True
     command = info["command"]
     aim = info["aim"]
     data = info["data"]
@@ -2521,15 +2525,21 @@ def cmd_run(args):
 
         try:
             passes = 0
+            idle_after = float(getattr(args, "idle_after", 0) or 0)
             while not stop_event.is_set():
                 try:
                     snapshot = collector.collect()
+                    if idle_after > 0:
+                        # Round off the jitter before it can look like a
+                        # change; see _quantize_snapshot.
+                        snapshot = _quantize_snapshot(snapshot)
                     packets = _sequence(snapshot, builder, args)
                 except Exception as exc:  # noqa: BLE001 - keep the service alive
                     _log("stats/build failed: %s" % exc)
                     stop_event.wait(args.interval)
                     continue
                 passes += 1
+                everything = packets
                 cadence = _cadence_of(args)
                 # The first frame (and every static period after it) sends
                 # everything, so a fresh or reset panel is fully populated.
@@ -2554,6 +2564,29 @@ def cmd_run(args):
                 else:
                     packets = base
                     state["page_pending"] = []
+                if idle_after > 0:
+                    wake = bool(state.pop("wake_requested", False))
+                    # Judge the whole frame, not the trimmed one: the number
+                    # of packets varies per pass by design, so a signature over
+                    # the trimmed list would differ every time.
+                    send, force_full = _idle_decision(
+                        state, everything, time.monotonic(), idle_after, wake)
+                    if force_full:
+                        packets = everything
+                        state["page_pending"] = []
+                        state["page_catch_up"] = False
+                    if not send:
+                        if not state.get("idle_logged"):
+                            _log("idle: nothing changed for %.0fs, stopped "
+                                 "sending so the panel can blank"
+                                 % idle_after)
+                            state["idle_logged"] = True
+                        stop_event.wait(min(IDLE_CHECK_SECONDS,
+                                            max(1.0, idle_after / 4.0)))
+                        continue
+                    if state.get("idle_logged"):
+                        _log("wake: sending again")
+                        state["idle_logged"] = False
                 try:
                     _write_frame(transport, packets, _run_pace(args),
                                  progress=True)
@@ -2672,6 +2705,7 @@ def _config_defaults(path):
     take("every_static", "every_static", int, 1, 60)
     take("page_burst", "page_burst", int, 1, PAGE_BURST_MAX)
     take("wlan_slots", "wlan_slots", int, 1, 3)
+    take("idle_after", "idle_after", float, 0.0, 3600.0)
     take("syscount", "syscount", lambda v: None if str(v).lower() == "auto"
          else int(v), None, None)
 
@@ -2708,6 +2742,123 @@ def _config_defaults(path):
     defaults["wake_disks"] = _as_bool(cfg.get("wake_disks"), False)
     defaults["verbose"] = _as_bool(cfg.get("log_verbose"), False)
     return defaults
+
+
+# The panel blanks its own screen when it stops receiving traffic, so the
+# only way to let it sleep is to stop sending. "Nothing changed" is measured on
+# what the screen would actually show, after rounding the jittery fields down
+# to a resolution nobody can see - otherwise a CPU reading wobbling between 2%
+# and 4% would count as a change every single frame and the panel would never
+# go quiet.
+IDLE_AFTER_DEFAULT = 120.0
+IDLE_CHECK_SECONDS = 5.0
+USAGE_STEP = 10
+FAN_STEP = 5
+SPEED_FLOOR_KBPS = 16
+SPEED_STEP_KBPS = 16
+TRAFFIC_STEP_KB = 1024
+SENTINELS = (NO_VALUE, 0xFE, None)
+
+
+def _round_step(value, step):
+    """Round to a multiple of `step`, passing "no data" markers straight through."""
+    if value in SENTINELS:
+        return value
+    try:
+        # Floor, not round: a reading hovering either side of a rounding
+        # boundary would flip the bucket every frame and never settle.
+        return int(int(value) // step * step)
+    except (TypeError, ValueError):
+        return value
+
+
+def _round_speed(value):
+    if value in SENTINELS:
+        return value
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return value
+    if value < SPEED_FLOOR_KBPS:
+        return 0
+    return int(round(value / float(SPEED_STEP_KBPS)) * SPEED_STEP_KBPS)
+
+
+def _quantize_snapshot(snapshot):
+    """A copy rounded to what the eye can tell apart.
+
+    Only the fields that move on their own are touched: usage, fan speed, link
+    rate and cumulative traffic. Temperatures and capacities already change at
+    a human pace.
+    """
+    quiet = copy.copy(snapshot)
+    quiet.cpu_usage = _round_step(snapshot.cpu_usage, USAGE_STEP)
+    quiet.mem_usage = _round_step(snapshot.mem_usage, USAGE_STEP)
+    quiet.igpu_usage = _round_step(snapshot.igpu_usage, USAGE_STEP)
+    quiet.dgpu_usage = _round_step(snapshot.dgpu_usage, USAGE_STEP)
+    quiet.cpu_fan = _round_step(snapshot.cpu_fan, FAN_STEP)
+    quiet.mem_fan = _round_step(snapshot.mem_fan, FAN_STEP)
+    quiet.igpu_fan = _round_step(snapshot.igpu_fan, FAN_STEP)
+    quiet.dgpu_fan = _round_step(snapshot.dgpu_fan, FAN_STEP)
+    quiet.disks = [copy.copy(disk) for disk in snapshot.disks]
+    quiet.networks = []
+    for net in snapshot.networks:
+        item = copy.copy(net)
+        item.up_kbps = _round_speed(net.up_kbps)
+        item.down_kbps = _round_speed(net.down_kbps)
+        item.total_kb = _round_step(net.total_kb, TRAFFIC_STEP_KB)
+        quiet.networks.append(item)
+    return quiet
+
+
+def _frame_signature(packets):
+    """Digest of what the panel would draw.
+
+    Only the payload counts: the sequence number and the checksum it feeds
+    change on every single frame and say nothing about what the panel draws.
+
+    Both clock pages are excluded on purpose: HomePage and Time carry nothing
+    but the timestamp, which ticks once a minute, and counting that as a change
+    would wake the panel - and defeat the blank - every 60 seconds.
+    """
+    digest = hashlib.sha1()
+    for packet in packets:
+        if len(packet) > 6 and packet[5] in (proto.AIM_HOME, proto.AIM_TIME):
+            continue
+        # magic(2) + seq(1) at the front, checksum(1) at the back
+        digest.update(packet[3:-1])
+    return digest.digest()
+
+
+def _idle_decision(state, packets, now, idle_after, wake=False):
+    """Decide whether to send this pass.
+
+    Returns (should_send, force_full). "Nothing changed" starts the clock; once
+    it has run for `idle_after` seconds the traffic stops entirely, which is
+    what lets the panel blank. Any change, a panel button, or a page switch
+    resumes with a full frame so the screen cannot stay half-updated.
+    """
+    signature = _frame_signature(packets)
+    key = (signature, state.get("visible_page"))
+    changed = key != state.get("idle_key")
+    if changed:
+        state["idle_key"] = key
+        state["idle_since"] = now
+
+    if idle_after <= 0:
+        state["idle"] = False
+        return True, False
+
+    if wake or changed:
+        resuming = bool(state.get("idle"))
+        state["idle"] = False
+        return True, resuming
+
+    if now - state.get("idle_since", now) >= idle_after:
+        first = not state.get("idle")
+        state["idle"] = True
+        return False, first
+    return True, False
 
 
 def _cadence_of(args):
@@ -3332,6 +3483,11 @@ def build_parser():
     parser.add_argument("--every-static", type=int, default=None, metavar="N",
                         help="send home/mode/info/online flag every N frames "
                              "(default 12)")
+    parser.add_argument("--idle-after", type=float, default=IDLE_AFTER_DEFAULT,
+                        metavar="SECONDS",
+                        help="stop sending once nothing on screen has changed "
+                             "for this long, so the panel can blank itself; "
+                             "0 disables (default %d)" % int(IDLE_AFTER_DEFAULT))
     parser.add_argument("--no-lean", dest="lean", action="store_false",
                         help="run: re-send the static pages (home, mode, info, "
                              "wlan user) on every frame instead of every 12th")
