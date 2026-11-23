@@ -2516,6 +2516,7 @@ def cmd_run(args):
         # arm one catch-up pass so the page the user is on gets redrawn.
         state["page_catch_up"] = True
 
+        _log(_idle_banner(args))
         reader_stop = threading.Event()
         reader = threading.Thread(
             target=_reader_loop,
@@ -3535,6 +3536,42 @@ def _version_line():
         sys.version.split()[0])
 
 
+def _idle_banner(args):
+    """One line naming the effective idle window.
+
+    Printed at startup and by `version`. Without it, "no idle line in the log"
+    is ambiguous: it can mean the daemon never reached idle *or* that the
+    process is still an older build started before the upgrade.
+    """
+    idle_after = float(getattr(args, "idle_after", 0) or 0)
+    if idle_after <= 0:
+        return "idle: blank disabled (idle_after=0)"
+    return "idle: blank after %.0fs without input or material change" % idle_after
+
+
+def _running_pid():
+    try:
+        with open("/var/run/mnasx1-subscreen.pid", "r", encoding="ascii") as handle:
+            return int(handle.read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def _process_start_epoch(pid):
+    """Wall-clock start time of a pid, or None when it cannot be read."""
+    try:
+        with open("/proc/%d/stat" % pid, "r", encoding="ascii") as handle:
+            fields = handle.read().rsplit(")", 1)[1].split()
+        # Field 22 of /proc/PID/stat is starttime in clock ticks since boot.
+        ticks = int(fields[19])
+        with open("/proc/uptime", "r", encoding="ascii") as handle:
+            uptime = float(handle.read().split()[0])
+        frequency = os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return None
+    return time.time() - (uptime - ticks / float(frequency))
+
+
 def cmd_version(args):
     """Print the identity of the files actually being executed."""
     print(_version_line())
@@ -3544,6 +3581,15 @@ def cmd_version(args):
                                   "readable" if _unraid_disk_table()
                                   else "not readable"))
     print("smartctl : %s" % (_find_smartctl() or "not found"))
+    print(_idle_banner(args))
+    pid = _running_pid()
+    if pid:
+        started = _process_start_epoch(pid)
+        code_mtime = os.path.getmtime(os.path.abspath(__file__))
+        if started is not None and started < code_mtime:
+            print("WARNING  : pid %d started %.0fs before this file was "
+                  "installed - restart the daemon to run this code"
+                  % (pid, code_mtime - started))
     return 0
 
 

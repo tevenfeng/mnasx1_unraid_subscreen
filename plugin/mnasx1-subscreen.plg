@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "mnasx1-subscreen">
 <!ENTITY author    "tevenfeng">
-<!ENTITY version   "2026.11.23">
+<!ENTITY version   "2026.11.23a">
 <!ENTITY flash     "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
 <!ENTITY pkg       "&name;-&version;-x86_64-1.txz">
@@ -27,7 +27,7 @@
      would silently keep installing the previous build after an upgrade. -->
 <FILE Name="&flash;/&pkg;" Run="upgradepkg --install-new --reinstall">
 <URL>https://github.com/tevenfeng/mnasx1_unraid_subscreen/releases/download/&version;/&pkg;</URL>
-<SHA256>28c625d139e7814c56872d6b6c2ce87e6f2100be5e99aaf3ed84aecc4dc2cfff</SHA256>
+<SHA256>c957e799de14751d76172f47853cb2b03a0c13e7bb05665e75abd65130322795</SHA256>
 </FILE>
 
 <!-- Runs on every boot, after the package is unpacked into RAM. -->
@@ -50,6 +50,17 @@ rm -f /etc/rc.d/rc.subscreen
 # Refresh the translation-free page cache is unnecessary (the page is bilingual
 # inline), but a stale .dot from an older layout would hide the new one.
 rm -f /usr/local/emhttp/languages/*/mnasx1-subscreen.dot 2>/dev/null || true
+
+# An upgrade replaces the files underneath a process that is still running, so
+# it would keep executing the previous build until the next array restart. That
+# looks exactly like "the update did nothing".
+PIDFILE=/var/run/mnasx1-subscreen.pid
+if [ -s "$PIDFILE" ]; then
+  PID=$(cat "$PIDFILE" 2>/dev/null)
+  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    /usr/local/emhttp/plugins/mnasx1-subscreen/scripts/restart.sh >/dev/null 2>&1 || true
+  fi
+fi
 
 # The daemon is started by event/started, not here: at this point the array is
 # not mounted yet and /mnt/disk* does not exist.

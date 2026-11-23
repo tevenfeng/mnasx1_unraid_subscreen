@@ -206,3 +206,22 @@ class PluginDescriptorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     sys.exit(unittest.main())
+
+
+class UpgradeHandlingTest(unittest.TestCase):
+    """An upgrade replaces files under a running process; without a restart
+    the old build keeps running and the update looks like it did nothing."""
+
+    def _descriptor(self):
+        path = os.path.join(ROOT, "plugin", "mnasx1-subscreen.plg")
+        if not os.path.exists(path):
+            self.skipTest(".plg not built yet; run plugin/build.sh")
+        return open(path, encoding="utf-8").read()
+
+    def test_install_block_restarts_a_running_daemon(self):
+        text = self._descriptor()
+        install = text.split('Method="remove"')[0]
+        self.assertIn("/var/run/mnasx1-subscreen.pid", install)
+        self.assertIn("restart.sh", install)
+        self.assertIn("kill -0", install,
+                      "only restart when a process is actually alive")

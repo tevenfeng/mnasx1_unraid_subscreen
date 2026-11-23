@@ -19,6 +19,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
 $cfg = subsys_read_config();
 $running = subsys_daemon_running();
+$stale = $running && subsys_running_stale();
 $python = subsys_python();
 $pythonOk = $python !== '' && is_executable($python);
 
@@ -78,10 +79,20 @@ $labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'd
       <span><?=subsys_h($version)?></span>
     </div>
     <div class="subsys-row">
+      <span>空闲熄屏 / Idle blank</span>
+      <span><?=($cfg['idle_after'] === '0') ? '关闭 disabled' : subsys_h($cfg['idle_after']) . ' 秒'?></span>
+    </div>
+    <div class="subsys-row">
       <span>配置 / Config</span>
       <span><small><?=subsys_h(SUBSYS_CONFIG)?></small></span>
     </div>
   </div>
+  <?php if ($stale): ?>
+  <p class="subsys-bad">
+    运行中的进程仍是升级前的旧代码（文件已更新、进程没重启）。点「重启」后新设置才会生效。<br>
+    The running process predates the installed code - press Restart to run the new build.
+  </p>
+  <?php endif; ?>
   <?php if (!$pythonOk): ?>
   <p class="subsys-bad">
     Unraid 基础系统不含 Python。请先安装 NerdTools 或 Python 3 插件，否则守护进程无法启动。<br>

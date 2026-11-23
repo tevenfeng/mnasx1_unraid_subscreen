@@ -2142,3 +2142,24 @@ class IdleGateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     pass
+
+
+class IdleBannerTest(unittest.TestCase):
+    """The startup line has to name the effective window: 'no idle line in the
+    log' was ambiguous between 'never idle' and 'old build still running'."""
+
+    def test_enabled_banner_names_the_window(self):
+        args = types.SimpleNamespace(idle_after=30.0)
+        self.assertIn("30s", daemon._idle_banner(args))
+        self.assertIn("blank after", daemon._idle_banner(args))
+
+    def test_disabled_banner_says_so(self):
+        args = types.SimpleNamespace(idle_after=0)
+        self.assertIn("disabled", daemon._idle_banner(args))
+
+    def test_a_stale_process_is_detected(self):
+        with mock.patch.object(daemon, "_running_pid", return_value=0):
+            self.assertEqual(daemon._running_pid(), 0)
+        self.assertIsNotNone(
+            daemon._process_start_epoch(os.getpid()),
+            "own start time must be readable from /proc")

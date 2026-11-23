@@ -116,6 +116,37 @@ function subsys_python(): string
     return $found;
 }
 
+/* True when the running process started before the installed code was
+ * replaced, i.e. it is still executing the previous build. An upgrade that
+ * does not restart the daemon looks exactly like a fix that did nothing. */
+function subsys_running_stale(): bool
+{
+    $pidfile = '/var/run/mnasx1-subscreen.pid';
+    if (!is_readable($pidfile)) {
+        return false;
+    }
+    $pid = (int)trim((string)file_get_contents($pidfile));
+    if ($pid <= 0 || !file_exists("/proc/$pid")) {
+        return false;
+    }
+    $stat = @file_get_contents("/proc/$pid/stat");
+    $uptime = @file_get_contents('/proc/uptime');
+    $code = SUBSYS_APP_DIR . '/subscreen_daemon.py';
+    if ($stat === false || $uptime === false || !is_readable($code)) {
+        return false;
+    }
+    $tail = substr($stat, strrpos($stat, ')') + 1);
+    $fields = preg_split('/\s+/', trim($tail));
+    if (count($fields) < 20) {
+        return false;
+    }
+    $ticks = (int)$fields[19];
+    $hz = 100;
+    $since_boot = (float)explode(' ', trim($uptime))[0];
+    $started = time() - ($since_boot - $ticks / $hz);
+    return $started < filemtime($code);
+}
+
 function subsys_daemon_running(): bool
 {
     $pidfile = '/var/run/mnasx1-subscreen.pid';
