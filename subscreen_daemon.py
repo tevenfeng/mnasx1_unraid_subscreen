@@ -2229,15 +2229,16 @@ def _handle_hibernate(args, state):
 
 
 def _handle_incoming(info, args, state):
-    # Any frame from the panel means a human touched it: wake the sender even
-    # if no displayed value changed.
-    state["wake_requested"] = True
+    # Only real input counts as a touch. The panel also emits a status frame a
+    # few times a second *because* we are sending, and treating those as input
+    # reset the idle timer forever - the screen could never blank.
     command = info["command"]
     aim = info["aim"]
     data = info["data"]
     crc_note = "" if info.get("crc_ok") in (True, None) else " [bad crc]"
 
     if command == proto.CMD_EVENT:
+        state["wake_requested"] = True      # a human pressed something
         if aim in proto.EVENT_PAGES:
             _log("panel: page select 0x%02X (%s)%s"
                  % (aim, PAGE_NAMES.get(aim, "unknown"), crc_note))
@@ -2268,6 +2269,9 @@ def _handle_incoming(info, args, state):
         # its own running counter (not an echo of ours) and appears a few times
         # a second while the panel is being fed data, stopping when the link
         # goes quiet. Nothing to reply to; log it only when asked.
+        # Pure heartbeat: it arrives because we are sending, and its aim is a
+        # firmware code (0x0A/0x0B/...), not the visible page. Never treat it as
+        # input, or the idle timer would be reset forever.
         _log("panel: status page=0x%02X seq=%d%s"
              % (aim, info.get("sequence", -1), crc_note), verbose_only=True)
     else:

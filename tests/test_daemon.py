@@ -2163,3 +2163,64 @@ class IdleBannerTest(unittest.TestCase):
         self.assertIsNotNone(
             daemon._process_start_epoch(os.getpid()),
             "own start time must be readable from /proc")
+
+
+class PanelEventWakeTest(unittest.TestCase):
+    """The panel's status heartbeat must not count as input.
+
+    It is emitted a few times a second *because* we are sending, so treating it
+    as activity reset the idle timer forever and the screen never blanked.
+    """
+
+    def _info(self, command, aim, data=b""):
+        return {"command": command, "aim": aim, "data": data, "crc_ok": True,
+                "sequence": 1, "length": 6, "raw": b"\\xa5\\x5a\\x01\\x04\\x02\\x00"}
+
+    def _args(self):
+        return types.SimpleNamespace(allow_hibernate=False)
+
+    def test_status_heartbeat_does_not_wake(self):
+        state = {"visible_page": 0x10}
+        daemon._handle_incoming(self._info(proto.CMD_UPDATE, 0x10),
+                                self._args(), state)
+        self.assertFalse(state.get("wake_requested"))
+
+    def test_a_status_frame_is_not_a_page_turn(self):
+        state = {"visible_page": 0x10}
+        daemon._handle_incoming(self._info(proto.CMD_UPDATE, 0x50),
+                                self._args(), state)
+        self.assertFalse(state.get("wake_requested"))
+        self.assertEqual(state["visible_page"], 0x10,
+                         "the status aim is a firmware code, not the page")
+
+    def test_a_button_event_wakes(self):
+        state = {}
+        daemon._handle_incoming(
+            self._info(proto.CMD_EVENT, sorted(proto.EVENT_PAGES)[0]),
+            self._args(), state)
+        self.assertTrue(state.get("wake_requested"))
+
+    def test_heartbeats_do_not_prevent_idle(self):
+        """The regression: a heartbeat every pass kept the screen awake."""
+        state = {"visible_page": 0x10}
+        idle_at = None
+        for passes in range(1, 60):
+            daemon._handle_incoming(self._info(proto.CMD_UPDATE, 0x10),
+                                    self._args(), state)
+            metrics = daemon._coarse_metrics(self._snapshot())
+            wake = bool(state.pop("wake_requested", False))
+            send, _ = daemon._idle_tick(state, metrics, float(passes), 30.0,
+                                        wake)
+            if not send and idle_at is None:
+                idle_at = passes
+        self.assertEqual(idle_at, 31)
+
+    def _snapshot(self):
+        snapshot = proto.SystemSnapshot(timestamp=1000, cpu_usage=10,
+                                        cpu_temp=45, cpu_fan=900, mem_usage=60,
+                                        device_name="T", cpu_name="X",
+                                        os_name="U", serial="S")
+        snapshot.networks = [proto.WlanItem(0, 40, 60, 5_000_000,
+                                            (192, 168, 1, 2), "br0")]
+        snapshot.disks = [proto.DiskItem(0, 400, 200, 33, "disk1")]
+        return snapshot
