@@ -27,7 +27,7 @@
      would silently keep installing the previous build after an upgrade. -->
 <FILE Name="&flash;/&pkg;" Run="upgradepkg --install-new --reinstall">
 <URL>https://github.com/tevenfeng/mnasx1_unraid_subscreen/releases/download/&version;/&pkg;</URL>
-<SHA256>200c7e1366a102a4d9ba58ad12e6806f236dea2db1561ea20c31821a0587ca58</SHA256>
+<SHA256>ceb3a10ff3ead0e4fa78871eb1f9db3519b85c8071a157097e60967136a859c2</SHA256>
 </FILE>
 
 <!-- Runs on every boot, after the package is unpacked into RAM. -->
