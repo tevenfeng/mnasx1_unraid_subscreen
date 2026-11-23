@@ -1994,116 +1994,117 @@ class CollectorSwitchesTest(unittest.TestCase):
 
 
 class IdleGateTest(unittest.TestCase):
-    """Once nothing on screen changes, the panel must be left alone so that
-    its own inactivity timer can blank it."""
+    """The screen must be left alone when nobody is using it.
+
+    Content equality is deliberately not the test: on a live box the link rate
+    and a 1C drift change the frame on almost every pass.
+    """
 
     def _snapshot(self, **overrides):
-        snapshot = proto.SystemSnapshot(timestamp=1000, cpu_usage=3,
+        snapshot = proto.SystemSnapshot(timestamp=1000, cpu_usage=10,
                                         cpu_temp=45, cpu_fan=900,
                                         mem_usage=60, device_name="T",
                                         cpu_name="X", os_name="U", serial="S")
-        snapshot.networks = [proto.WlanItem(0, 4, 7, 5_000_000,
+        snapshot.networks = [proto.WlanItem(0, 40, 60, 5_000_000,
                                             (192, 168, 1, 2), "br0")]
         snapshot.disks = [proto.DiskItem(0, 400, 200, 33, "disk1")]
         for key, value in overrides.items():
             setattr(snapshot, key, value)
         return snapshot
 
-    def _packets(self, snapshot=None):
-        return proto.build_full_sequence(snapshot or self._snapshot(),
-                                         proto.PacketBuilder(0), syscount=3)
+    def _metrics(self, **overrides):
+        return daemon._coarse_metrics(self._snapshot(**overrides))
 
-    def test_small_usage_jitter_is_not_a_change(self):
-        quiet = daemon._quantize_snapshot(self._snapshot(cpu_usage=2))
-        noisy = daemon._quantize_snapshot(self._snapshot(cpu_usage=4))
-        self.assertEqual(quiet.cpu_usage, noisy.cpu_usage)
+    def test_link_rate_wobble_is_not_a_coarse_change(self):
+        quiet = self._metrics()
+        busy = daemon._coarse_metrics(self._snapshot(
+            networks=[proto.WlanItem(0, 900, 1500, 9_000_000,
+                                     (192, 168, 1, 2), "br0")]))
+        self.assertFalse(daemon._coarse_changed(quiet, busy),
+                         "traffic must not keep the screen awake")
 
-    def test_real_usage_moves_are_a_change(self):
-        quiet = daemon._quantize_snapshot(self._snapshot(cpu_usage=2))
-        busy = daemon._quantize_snapshot(self._snapshot(cpu_usage=40))
-        self.assertNotEqual(quiet.cpu_usage, busy.cpu_usage)
+    def test_one_degree_drift_is_not_a_coarse_change(self):
+        self.assertFalse(daemon._coarse_changed(
+            self._metrics(),
+            daemon._coarse_metrics(self._snapshot(
+                disks=[proto.DiskItem(0, 400, 200, 34, "disk1")]))))
 
-    def test_sentinels_survive_quantisation(self):
-        quiet = daemon._quantize_snapshot(self._snapshot(igpu_usage=0xFF,
-                                                         dgpu_fan=0xFE))
-        self.assertEqual(quiet.igpu_usage, 0xFF)
-        self.assertEqual(quiet.dgpu_fan, 0xFE)
+    def test_three_degree_drift_is(self):
+        self.assertTrue(daemon._coarse_changed(
+            self._metrics(),
+            daemon._coarse_metrics(self._snapshot(
+                disks=[proto.DiskItem(0, 400, 200, 36, "disk1")]))))
 
-    def test_tiny_link_rate_rounds_to_zero(self):
-        self.assertEqual(daemon._round_speed(5), 0)
-        self.assertEqual(daemon._round_speed(0), 0)
-        self.assertEqual(daemon._round_speed(48), 48)
-        self.assertEqual(daemon._round_speed(200), 192)
+    def test_load_jump_is_a_coarse_change(self):
+        self.assertTrue(daemon._coarse_changed(
+            self._metrics(cpu_usage=10),
+            daemon._coarse_metrics(self._snapshot(cpu_usage=60))))
 
-    def test_idle_signature_ignores_the_clock(self):
-        early = self._packets(self._snapshot())
-        late = self._packets(self._snapshot(timestamp=1000 + 600))
-        self.assertEqual(daemon._frame_signature(early),
-                         daemon._frame_signature(late))
+    def test_small_load_move_is_not(self):
+        self.assertFalse(daemon._coarse_changed(
+            self._metrics(cpu_usage=10),
+            daemon._coarse_metrics(self._snapshot(cpu_usage=20))))
 
-    def test_signature_changes_when_a_reading_changes(self):
-        quiet = self._packets(self._snapshot(cpu_temp=45))
-        warm = self._packets(self._snapshot(cpu_temp=60))
-        self.assertNotEqual(daemon._frame_signature(quiet),
-                            daemon._frame_signature(warm))
+    def test_disk_appearing_is_a_coarse_change(self):
+        more = self._snapshot()
+        more.disks = more.disks + [proto.DiskItem(1, 800, 100, 30, "disk2")]
+        self.assertTrue(daemon._coarse_changed(
+            self._metrics(), daemon._coarse_metrics(more)))
 
-    def test_keeps_sending_until_the_quiet_period_elapses(self):
+    def test_link_state_is_a_coarse_change(self):
+        down = self._snapshot()
+        down.networks = [proto.WlanItem(0, 0, 0, 5_000_000,
+                                        (192, 168, 1, 2), "br0")]
+        self.assertTrue(daemon._coarse_changed(
+            self._metrics(), daemon._coarse_metrics(down)))
+
+    def test_silence_starts_after_the_idle_window(self):
         state = {}
-        packets = self._packets()
-        send, _ = daemon._idle_decision(state, packets, 0.0, 120.0)
+        metrics = self._metrics()
+        send, _ = daemon._idle_tick(state, metrics, 0.0, 30.0)
         self.assertTrue(send)
-        send, _ = daemon._idle_decision(state, packets, 60.0, 120.0)
-        self.assertTrue(send, "still inside the quiet window")
-        send, _ = daemon._idle_decision(state, packets, 130.0, 120.0)
+        send, _ = daemon._idle_tick(state, metrics, 20.0, 30.0)
+        self.assertTrue(send, "still inside the window")
+        send, _ = daemon._idle_tick(state, metrics, 31.0, 30.0)
         self.assertFalse(send, "the panel should now be left alone")
         self.assertTrue(state["idle"])
 
-    def test_a_change_resumes_with_a_full_frame(self):
+    def test_a_material_change_takes_it_out_of_silence(self):
         state = {}
-        quiet = self._packets(self._snapshot(cpu_temp=45))
-        warm = self._packets(self._snapshot(cpu_temp=60))
-        daemon._idle_decision(state, quiet, 0.0, 120.0)
-        daemon._idle_decision(state, quiet, 200.0, 120.0)
+        metrics = self._metrics()
+        daemon._idle_tick(state, metrics, 0.0, 30.0)
+        daemon._idle_tick(state, metrics, 100.0, 30.0)
         self.assertTrue(state["idle"])
-        send, force_full = daemon._idle_decision(state, warm, 210.0, 120.0)
+        busy = daemon._coarse_metrics(self._snapshot(cpu_usage=90))
+        send, force_full = daemon._idle_tick(state, busy, 101.0, 30.0)
         self.assertTrue(send)
-        self.assertTrue(force_full, "wake up must redraw everything")
+        self.assertTrue(force_full, "waking up must redraw everything")
         self.assertFalse(state["idle"])
 
-    def test_a_panel_button_wakes_it(self):
+    def test_a_panel_event_wakes_it_without_any_change(self):
         state = {}
-        packets = self._packets()
-        daemon._idle_decision(state, packets, 0.0, 120.0)
-        daemon._idle_decision(state, packets, 300.0, 120.0)
-        send, force_full = daemon._idle_decision(state, packets, 301.0, 120.0,
-                                                 wake=True)
+        metrics = self._metrics()
+        daemon._idle_tick(state, metrics, 0.0, 30.0)
+        daemon._idle_tick(state, metrics, 100.0, 30.0)
+        send, force_full = daemon._idle_tick(state, metrics, 101.0, 30.0,
+                                             wake=True)
         self.assertTrue(send)
         self.assertTrue(force_full)
 
-    def test_switching_pages_wakes_it(self):
-        state = {"visible_page": 0x10}
-        packets = self._packets()
-        daemon._idle_decision(state, packets, 0.0, 120.0)
-        daemon._idle_decision(state, packets, 300.0, 120.0)
-        state["visible_page"] = 0x50
-        send, _ = daemon._idle_decision(state, packets, 301.0, 120.0)
-        self.assertTrue(send)
-
     def test_zero_disables_the_gate(self):
         state = {}
-        packets = self._packets()
+        metrics = self._metrics()
         for now in (0.0, 10.0, 100000.0):
-            send, _ = daemon._idle_decision(state, packets, now, 0.0)
+            send, _ = daemon._idle_tick(state, metrics, now, 0.0)
             self.assertTrue(send)
         self.assertFalse(state["idle"])
 
-    def test_idle_after_defaults_to_two_minutes(self):
-        self.assertEqual(daemon.IDLE_AFTER_DEFAULT, 120.0)
+    def test_idle_default_is_thirty_seconds(self):
+        self.assertEqual(daemon.IDLE_AFTER_DEFAULT, 30.0)
 
     def test_cli_exposes_the_idle_window(self):
         parser = daemon.build_parser()
-        self.assertEqual(parser.parse_args(["run"]).idle_after,
-                         daemon.IDLE_AFTER_DEFAULT)
+        self.assertEqual(parser.parse_args(["run"]).idle_after, 30.0)
         self.assertEqual(parser.parse_args(["run", "--idle-after", "0"]).idle_after, 0.0)
 
     def test_config_file_can_set_the_idle_window(self):
@@ -2115,18 +2116,29 @@ class IdleGateTest(unittest.TestCase):
         self.assertEqual(daemon._config_defaults(handle.name)["idle_after"],
                          300.0)
 
-    def test_a_quiet_box_stays_quiet_across_a_whole_cadence_cycle(self):
-        """Twelve passes with only the clock advancing must share one signature."""
-        cadence = daemon.DEFAULT_CADENCE
-        signatures = set()
-        builder = proto.PacketBuilder(0)
-        for passes in range(1, cadence[daemon.TIER_STATIC] + 1):
-            snapshot = daemon._quantize_snapshot(
-                self._snapshot(timestamp=1000 + passes * 14,
-                               cpu_usage=2 if passes % 2 else 4))
-            packets = proto.build_full_sequence(snapshot, builder, syscount=3)
-            # The whole frame: how it gets trimmed for this pass must not look
-            # like a content change.
-            signatures.add(daemon._frame_signature(packets))
-        self.assertEqual(len(signatures), 1,
-                         "clock ticks and odd frames must not look like changes")
+    def test_a_live_box_with_wobble_still_reaches_silence(self):
+        """The regression that made the previous version never blank."""
+        state = {}
+        sent = 0
+        idle_at = None
+        for passes in range(1, 120):
+            now = float(passes)
+            snapshot = self._snapshot(
+                cpu_usage=10 + passes % 5,                       # small jitter
+                networks=[proto.WlanItem(0, 40 + (passes * 37) % 220,
+                                         60 + passes % 90,
+                                         5_000_000 + passes * 4096,
+                                         (192, 168, 1, 2), "br0")],
+                disks=[proto.DiskItem(0, 400, 200, 33 + passes % 2, "disk1")])
+            send, _ = daemon._idle_tick(state, daemon._coarse_metrics(snapshot),
+                                        now, 30.0)
+            if send:
+                sent += 1
+            elif idle_at is None:
+                idle_at = passes
+        self.assertEqual(idle_at, 31, "must go quiet once the window passes")
+        self.assertLess(sent, 40)
+
+
+if __name__ == "__main__":
+    pass

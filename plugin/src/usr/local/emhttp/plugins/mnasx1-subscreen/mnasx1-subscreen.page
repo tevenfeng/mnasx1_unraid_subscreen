@@ -158,12 +158,14 @@ $labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'd
     Time between packets. Below 1.0 s the panel builds a backlog, freezes and stops taking input.<br>
     可见页优先：切页后当前页的数据立刻补发（每帧最多借用上面 N 个包位），其余页只是更新变慢，不会白屏。调大数字请逐档验证面板不卡。<br>
     Visible-page priority: after a page switch the shown page gets its fresh values first, borrowing up to N extra slots per frame; other pages only refresh slower. Raise the number one step at a time and confirm the panel stays responsive.<br>
-    空闲熄屏：屏幕内容连续这么多秒没有可见变化就完全停止发包，让面板自己的无数据超时关掉背光；期间时钟会停住，
-    按一下面板或数值变化立刻整帧唤醒。0 = 关闭。
+    空闲熄屏：从最后一次按键/翻页，或最后一次"明显变化"（负载 ±20%、温度 ±3°C、风扇 ±10%、磁盘增删或用量 ±1%、网卡 up/down 或 IP 变化）
+    起算，超过这么多秒就完全停止发包，让面板自己的无数据超时关掉背光。网速抖动、1°C 漂移不会重置计时。
+    期间时钟会停住；按面板键或出现明显变化会立刻整帧唤醒。0 = 关闭。
     <br>
-    Idle blank: stop sending entirely once nothing visible has changed for this long, so the panel's own
-    inactivity timer can switch the backlight off. The clock freezes meanwhile; a button press or any
-    changed reading redraws the whole frame. 0 disables it.
+    Idle blank: counted from the last key press / page turn or the last material change (load ±20 %,
+    temperature ±3 °C, fan ±10 %, a disk appearing or its usage ±1 %, link up/down or IP change).
+    After that many seconds the daemon stops sending entirely so the panel's own inactivity timer can
+    switch the backlight off. Rate wobble and 1 °C drift do not reset the clock. 0 disables it.
   </p>
 </div>
 

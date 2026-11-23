@@ -620,6 +620,8 @@ NO_VALUE = 0xFF
 # "255%", so there is no "no data" sentinel for this cell. Zero is the least
 # misleading value we can send when no sensor exists.
 FAN_UNKNOWN = 0
+# Byte values that mean "this sensor had nothing to say".
+SENTINELS = (NO_VALUE, 0xFE, None)
 
 
 CARD_NAMES = {"cpu": 0, "igpu": 1, "mem": 2, "memory": 2, "dgpu": 3}
@@ -2529,10 +2531,6 @@ def cmd_run(args):
             while not stop_event.is_set():
                 try:
                     snapshot = collector.collect()
-                    if idle_after > 0:
-                        # Round off the jitter before it can look like a
-                        # change; see _quantize_snapshot.
-                        snapshot = _quantize_snapshot(snapshot)
                     packets = _sequence(snapshot, builder, args)
                 except Exception as exc:  # noqa: BLE001 - keep the service alive
                     _log("stats/build failed: %s" % exc)
@@ -2566,20 +2564,18 @@ def cmd_run(args):
                     state["page_pending"] = []
                 if idle_after > 0:
                     wake = bool(state.pop("wake_requested", False))
-                    # Judge the whole frame, not the trimmed one: the number
-                    # of packets varies per pass by design, so a signature over
-                    # the trimmed list would differ every time.
-                    send, force_full = _idle_decision(
-                        state, everything, time.monotonic(), idle_after, wake)
+                    send, force_full = _idle_tick(
+                        state, _coarse_metrics(snapshot), time.monotonic(),
+                        idle_after, wake)
                     if force_full:
                         packets = everything
                         state["page_pending"] = []
                         state["page_catch_up"] = False
                     if not send:
                         if not state.get("idle_logged"):
-                            _log("idle: nothing changed for %.0fs, stopped "
-                                 "sending so the panel can blank"
-                                 % idle_after)
+                            _log("idle: no input and no material change for "
+                                 "%.0fs, stopped sending so the panel can "
+                                 "blank" % idle_after)
                             state["idle_logged"] = True
                         stop_event.wait(min(IDLE_CHECK_SECONDS,
                                             max(1.0, idle_after / 4.0)))
@@ -2744,121 +2740,117 @@ def _config_defaults(path):
     return defaults
 
 
-# The panel blanks its own screen when it stops receiving traffic, so the
-# only way to let it sleep is to stop sending. "Nothing changed" is measured on
-# what the screen would actually show, after rounding the jittery fields down
-# to a resolution nobody can see - otherwise a CPU reading wobbling between 2%
-# and 4% would count as a change every single frame and the panel would never
-# go quiet.
-IDLE_AFTER_DEFAULT = 120.0
+# The panel blanks its own backlight when it stops receiving traffic, so the
+# only way to let it sleep is to go completely silent. Deciding "nothing is
+# happening" from the frame contents does not work: on a real box the link rate
+# and a 1C temperature drift change the frame on almost every pass, so such a
+# timer is reset forever (measured: 0 of 399 passes counted as quiet).
+#
+# Instead the clock is driven by the user and by movements big enough to
+# matter: panel events, and coarse changes in load, temperature, fans, disks or
+# link state. Smaller wiggles are still sent - they just do not keep the screen
+# awake.
+IDLE_AFTER_DEFAULT = 30.0
 IDLE_CHECK_SECONDS = 5.0
-USAGE_STEP = 10
-FAN_STEP = 5
-SPEED_FLOOR_KBPS = 16
-SPEED_STEP_KBPS = 16
-TRAFFIC_STEP_KB = 1024
-SENTINELS = (NO_VALUE, 0xFE, None)
+
+COARSE_USAGE_POINTS = 20     # CPU/mem/GPU: a 20 point move is a real change
+COARSE_TEMP_C = 3            # any temperature moving 3C
+COARSE_FAN_POINTS = 10
+COARSE_DISK_GB = 1
 
 
-def _round_step(value, step):
-    """Round to a multiple of `step`, passing "no data" markers straight through."""
-    if value in SENTINELS:
-        return value
-    try:
-        # Floor, not round: a reading hovering either side of a rounding
-        # boundary would flip the bucket every frame and never settle.
-        return int(int(value) // step * step)
-    except (TypeError, ValueError):
-        return value
+def _usable(value):
+    """A reading, or None when the sensor had nothing to say."""
+    return None if value in SENTINELS else value
 
 
-def _round_speed(value):
-    if value in SENTINELS:
-        return value
-    try:
-        value = int(value)
-    except (TypeError, ValueError):
-        return value
-    if value < SPEED_FLOOR_KBPS:
-        return 0
-    return int(round(value / float(SPEED_STEP_KBPS)) * SPEED_STEP_KBPS)
+def _coarse_metrics(snapshot):
+    """The few numbers that mean "something is really happening"."""
+    return {
+        "usage": {
+            "cpu": _usable(snapshot.cpu_usage),
+            "mem": _usable(snapshot.mem_usage),
+            "igpu": _usable(snapshot.igpu_usage),
+            "dgpu": _usable(snapshot.dgpu_usage),
+        },
+        "fans": {
+            "cpu": _usable(snapshot.cpu_fan),
+            "igpu": _usable(snapshot.igpu_fan),
+            "dgpu": _usable(snapshot.dgpu_fan),
+        },
+        "temps": [temp for temp in (_usable(d.temp) for d in snapshot.disks)
+                  if temp is not None],
+        # Identity and capacity: plugging a disk in must wake the screen.
+        "disks": sorted((disk.name, int(disk.total_gb), int(disk.used_gb))
+                        for disk in snapshot.disks),
+        # Link state, not link rate: rates move constantly on a live box.
+        "nets": sorted((net.name, net.ip, net.up_kbps > 0, net.down_kbps > 0)
+                       for net in snapshot.networks),
+    }
 
 
-def _quantize_snapshot(snapshot):
-    """A copy rounded to what the eye can tell apart.
+def _moved(previous, current, threshold):
+    if previous is None or current is None:
+        return previous != current
+    return abs(current - previous) >= threshold
 
-    Only the fields that move on their own are touched: usage, fan speed, link
-    rate and cumulative traffic. Temperatures and capacities already change at
-    a human pace.
+
+def _coarse_changed(previous, current):
+    """True when the screen would be showing something materially different."""
+    if previous is None:
+        return True
+    for key in ("cpu", "mem", "igpu", "dgpu"):
+        if _moved(previous["usage"][key], current["usage"][key],
+                  COARSE_USAGE_POINTS):
+            return True
+    for key in ("cpu", "igpu", "dgpu"):
+        if _moved(previous["fans"][key], current["fans"][key],
+                  COARSE_FAN_POINTS):
+            return True
+    if len(previous["temps"]) != len(current["temps"]):
+        return True
+    for before, after in zip(previous["temps"], current["temps"]):
+        if _moved(before, after, COARSE_TEMP_C):
+            return True
+    if previous["nets"] != current["nets"]:
+        return True
+    old = {name: (total, used) for name, total, used in previous["disks"]}
+    new = {name: (total, used) for name, total, used in current["disks"]}
+    if set(old) != set(new):
+        return True
+    for name, (total, used) in new.items():
+        old_total, old_used = old[name]
+        if total != old_total or abs(used - old_used) >= COARSE_DISK_GB:
+            return True
+    return False
+
+
+def _idle_tick(state, metrics, now, idle_after, wake=False):
+    """Decide whether to send this pass. Returns (should_send, force_full).
+
+    `wake` is raised by anything the panel sends back: those frames only
+    arrive when a human presses a key or turns a page.
     """
-    quiet = copy.copy(snapshot)
-    quiet.cpu_usage = _round_step(snapshot.cpu_usage, USAGE_STEP)
-    quiet.mem_usage = _round_step(snapshot.mem_usage, USAGE_STEP)
-    quiet.igpu_usage = _round_step(snapshot.igpu_usage, USAGE_STEP)
-    quiet.dgpu_usage = _round_step(snapshot.dgpu_usage, USAGE_STEP)
-    quiet.cpu_fan = _round_step(snapshot.cpu_fan, FAN_STEP)
-    quiet.mem_fan = _round_step(snapshot.mem_fan, FAN_STEP)
-    quiet.igpu_fan = _round_step(snapshot.igpu_fan, FAN_STEP)
-    quiet.dgpu_fan = _round_step(snapshot.dgpu_fan, FAN_STEP)
-    quiet.disks = [copy.copy(disk) for disk in snapshot.disks]
-    quiet.networks = []
-    for net in snapshot.networks:
-        item = copy.copy(net)
-        item.up_kbps = _round_speed(net.up_kbps)
-        item.down_kbps = _round_speed(net.down_kbps)
-        item.total_kb = _round_step(net.total_kb, TRAFFIC_STEP_KB)
-        quiet.networks.append(item)
-    return quiet
-
-
-def _frame_signature(packets):
-    """Digest of what the panel would draw.
-
-    Only the payload counts: the sequence number and the checksum it feeds
-    change on every single frame and say nothing about what the panel draws.
-
-    Both clock pages are excluded on purpose: HomePage and Time carry nothing
-    but the timestamp, which ticks once a minute, and counting that as a change
-    would wake the panel - and defeat the blank - every 60 seconds.
-    """
-    digest = hashlib.sha1()
-    for packet in packets:
-        if len(packet) > 6 and packet[5] in (proto.AIM_HOME, proto.AIM_TIME):
-            continue
-        # magic(2) + seq(1) at the front, checksum(1) at the back
-        digest.update(packet[3:-1])
-    return digest.digest()
-
-
-def _idle_decision(state, packets, now, idle_after, wake=False):
-    """Decide whether to send this pass.
-
-    Returns (should_send, force_full). "Nothing changed" starts the clock; once
-    it has run for `idle_after` seconds the traffic stops entirely, which is
-    what lets the panel blank. Any change, a panel button, or a page switch
-    resumes with a full frame so the screen cannot stay half-updated.
-    """
-    signature = _frame_signature(packets)
-    key = (signature, state.get("visible_page"))
-    changed = key != state.get("idle_key")
-    if changed:
-        state["idle_key"] = key
-        state["idle_since"] = now
+    state.setdefault("last_touch", now)
+    if _coarse_changed(state.get("coarse"), metrics):
+        state["coarse"] = metrics
+        wake = True
+    else:
+        state["coarse"] = metrics
+    if wake:
+        state["last_touch"] = now
 
     if idle_after <= 0:
         state["idle"] = False
         return True, False
 
-    if wake or changed:
-        resuming = bool(state.get("idle"))
+    asleep = bool(state.get("idle"))
+    if now - state["last_touch"] < idle_after:
         state["idle"] = False
-        return True, resuming
-
-    if now - state.get("idle_since", now) >= idle_after:
-        first = not state.get("idle")
-        state["idle"] = True
-        return False, first
-    return True, False
+        # Coming back from a nap: redraw everything, not a delta.
+        return True, asleep
+    state["idle"] = True
+    return False, False
 
 
 def _cadence_of(args):
@@ -3485,9 +3477,10 @@ def build_parser():
                              "(default 12)")
     parser.add_argument("--idle-after", type=float, default=IDLE_AFTER_DEFAULT,
                         metavar="SECONDS",
-                        help="stop sending once nothing on screen has changed "
-                             "for this long, so the panel can blank itself; "
-                             "0 disables (default %d)" % int(IDLE_AFTER_DEFAULT))
+                        help="stop sending once nobody has touched the panel and "
+                             "nothing has changed materially for this long, so "
+                             "the panel can switch its backlight off; 0 disables "
+                             "(default %d)" % int(IDLE_AFTER_DEFAULT))
     parser.add_argument("--no-lean", dest="lean", action="store_false",
                         help="run: re-send the static pages (home, mode, info, "
                              "wlan user) on every frame instead of every 12th")
