@@ -2533,6 +2533,7 @@ def cmd_run(args):
         try:
             passes = 0
             idle_after = float(getattr(args, "idle_after", 0) or 0)
+            idle_debug = bool(getattr(args, "idle_debug", False))
             while not stop_event.is_set():
                 try:
                     snapshot = collector.collect()
@@ -2569,9 +2570,15 @@ def cmd_run(args):
                     state["page_pending"] = []
                 if idle_after > 0:
                     wake = bool(state.pop("wake_requested", False))
+                    metrics = _coarse_metrics(snapshot)
+                    if idle_debug:
+                        reasons = _coarse_changes(state.get("coarse"), metrics)
+                        if wake:
+                            reasons = ["panel event"] + reasons
+                        if reasons:
+                            _log("idle-debug: awake - %s" % ", ".join(reasons))
                     send, force_full = _idle_tick(
-                        state, _coarse_metrics(snapshot), time.monotonic(),
-                        idle_after, wake)
+                        state, metrics, time.monotonic(), idle_after, wake)
                     if force_full:
                         packets = everything
                         state["page_pending"] = []
@@ -2788,9 +2795,9 @@ def _coarse_metrics(snapshot):
         # Identity and capacity: plugging a disk in must wake the screen.
         "disks": sorted((disk.name, int(disk.total_gb), int(disk.used_gb))
                         for disk in snapshot.disks),
-        # Link state, not link rate: rates move constantly on a live box.
-        "nets": sorted((net.name, net.ip, net.up_kbps > 0, net.down_kbps > 0)
-                       for net in snapshot.networks),
+        # Identity and address only. Even "is the rate above zero" flips on a
+        # quiet link between samples, which kept resetting the idle timer.
+        "nets": sorted((net.name, net.ip) for net in snapshot.networks),
     }
 
 
@@ -2800,34 +2807,45 @@ def _moved(previous, current, threshold):
     return abs(current - previous) >= threshold
 
 
-def _coarse_changed(previous, current):
-    """True when the screen would be showing something materially different."""
+def _coarse_changes(previous, current):
+    """Names of the fields that moved enough to count as real activity."""
     if previous is None:
-        return True
+        return ["first"]
+    reasons = []
     for key in ("cpu", "mem", "igpu", "dgpu"):
         if _moved(previous["usage"][key], current["usage"][key],
                   COARSE_USAGE_POINTS):
-            return True
+            reasons.append("usage." + key)
     for key in ("cpu", "igpu", "dgpu"):
         if _moved(previous["fans"][key], current["fans"][key],
                   COARSE_FAN_POINTS):
-            return True
+            reasons.append("fan." + key)
     if len(previous["temps"]) != len(current["temps"]):
-        return True
-    for before, after in zip(previous["temps"], current["temps"]):
-        if _moved(before, after, COARSE_TEMP_C):
-            return True
+        reasons.append("temps.count")
+    else:
+        for index, (before, after) in enumerate(
+                zip(previous["temps"], current["temps"])):
+            if _moved(before, after, COARSE_TEMP_C):
+                reasons.append("temp[%d]" % index)
     if previous["nets"] != current["nets"]:
-        return True
+        reasons.append("nets")
     old = {name: (total, used) for name, total, used in previous["disks"]}
     new = {name: (total, used) for name, total, used in current["disks"]}
     if set(old) != set(new):
-        return True
-    for name, (total, used) in new.items():
-        old_total, old_used = old[name]
-        if total != old_total or abs(used - old_used) >= COARSE_DISK_GB:
-            return True
-    return False
+        reasons.append("disks.set")
+    else:
+        for name, (total, used) in new.items():
+            old_total, old_used = old[name]
+            if total != old_total:
+                reasons.append("disk[%s].size" % name)
+            elif abs(used - old_used) >= COARSE_DISK_GB:
+                reasons.append("disk[%s].used" % name)
+    return reasons
+
+
+def _coarse_changed(previous, current):
+    """True when the screen would be showing something materially different."""
+    return bool(_coarse_changes(previous, current))
 
 
 def _idle_tick(state, metrics, now, idle_after, wake=False):
@@ -3486,6 +3504,8 @@ def build_parser():
                              "nothing has changed materially for this long, so "
                              "the panel can switch its backlight off; 0 disables "
                              "(default %d)" % int(IDLE_AFTER_DEFAULT))
+    parser.add_argument("--idle-debug", action="store_true",
+                        help="log why the idle timer was reset, pass by pass")
     parser.add_argument("--no-lean", dest="lean", action="store_false",
                         help="run: re-send the static pages (home, mode, info, "
                              "wlan user) on every frame instead of every 12th")

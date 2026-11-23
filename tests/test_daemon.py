@@ -2051,12 +2051,26 @@ class IdleGateTest(unittest.TestCase):
         self.assertTrue(daemon._coarse_changed(
             self._metrics(), daemon._coarse_metrics(more)))
 
-    def test_link_state_is_a_coarse_change(self):
-        down = self._snapshot()
-        down.networks = [proto.WlanItem(0, 0, 0, 5_000_000,
-                                        (192, 168, 1, 2), "br0")]
+    def test_address_change_is_a_coarse_change(self):
+        moved = self._snapshot()
+        moved.networks = [proto.WlanItem(0, 40, 60, 5_000_000,
+                                         (192, 168, 1, 9), "br0")]
         self.assertTrue(daemon._coarse_changed(
-            self._metrics(), daemon._coarse_metrics(down)))
+            self._metrics(), daemon._coarse_metrics(moved)))
+
+    def test_a_quiet_link_going_to_zero_rate_is_not(self):
+        """Rates dropping below a sample is not "activity" - it flips on a
+        quiet link between samples and used to reset the timer forever."""
+        idle_link = self._snapshot()
+        idle_link.networks = [proto.WlanItem(0, 0, 0, 5_000_001,
+                                             (192, 168, 1, 2), "br0")]
+        self.assertFalse(daemon._coarse_changed(
+            self._metrics(), daemon._coarse_metrics(idle_link)))
+
+    def test_reasons_name_the_offending_field(self):
+        reasons = daemon._coarse_changes(
+            self._metrics(), daemon._coarse_metrics(self._snapshot(cpu_usage=80)))
+        self.assertEqual(reasons, ["usage.cpu"])
 
     def test_silence_starts_after_the_idle_window(self):
         state = {}

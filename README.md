@@ -92,6 +92,7 @@ python3 subscreen_daemon.py pattern          # 每格发一个独占数字，核
 | `--pace SECONDS` | `run` 每包间隔，默认 `1.5`（真机验证不会卡死的最快值） |
 | `--every-fast/medium/slow/static N` | 各层级每 N 帧发一次（默认 1/2/4/12） |
 | `--idle-after SECONDS` | 多久没人用面板后停止发送让面板熄屏（默认 30，0 = 关闭） |
+| `--idle-debug` | 每次重置空闲计时都打一行，指出是哪个字段（`usage.cpu` / `temp[0]` / `nets` …） |
 | `--no-lean` | 每帧都发全部页面（关闭分层节奏） |
 | `--page-burst N` | 切页后可见页每帧最多借用的补发包数，默认 4（范围 1–8，调大请逐档实测） |
 | `--no-page-priority` | 关闭可见页优先，回到纯四层节奏（页面切换不再影响发送顺序） |
