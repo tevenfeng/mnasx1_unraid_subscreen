@@ -78,6 +78,8 @@ function subsys_handle_post(): array
     $values['every_slow'] = subsys_clamp_int(subsys_post('every_slow'), 1, 60, $defaults['every_slow']);
     $values['every_static'] = subsys_clamp_int(subsys_post('every_static'), 1, 60, $defaults['every_static']);
     $values['idle_after'] = subsys_clamp_int(subsys_post('idle_after'), 0, 3600, $defaults['idle_after']);
+    $values['idle_source'] = subsys_pick(subsys_post('idle_source'),
+        ['use', 'activity'], $defaults['idle_source']);
     $values['page_priority'] = subsys_on_off('page_priority', $defaults['page_priority']);
     $values['page_burst'] = subsys_clamp_int(subsys_post('page_burst'), 1, 8, $defaults['page_burst']);
 

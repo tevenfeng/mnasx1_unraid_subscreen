@@ -2534,6 +2534,7 @@ def cmd_run(args):
             passes = 0
             idle_after = float(getattr(args, "idle_after", 0) or 0)
             idle_debug = bool(getattr(args, "idle_debug", False))
+            track_activity = (getattr(args, "idle_source", "use") == "activity")
             while not stop_event.is_set():
                 try:
                     snapshot = collector.collect()
@@ -2571,13 +2572,18 @@ def cmd_run(args):
                 if idle_after > 0:
                     wake = bool(state.pop("wake_requested", False))
                     metrics = _coarse_metrics(snapshot)
-                    wake_reasons = _coarse_changes(state.get("coarse"), metrics)
+                    if track_activity:
+                        wake_reasons = _coarse_changes(state.get("coarse"),
+                                                       metrics)
+                    else:
+                        wake_reasons = []
                     if wake:
                         wake_reasons = ["panel event"] + wake_reasons
                     if idle_debug and wake_reasons:
                         _log("idle-debug: awake - %s" % ", ".join(wake_reasons))
                     send, force_full = _idle_tick(
-                        state, metrics, time.monotonic(), idle_after, wake)
+                        state, metrics, time.monotonic(), idle_after, wake,
+                        track_activity)
                     if force_full:
                         packets = everything
                         state["page_pending"] = []
@@ -2714,6 +2720,8 @@ def _config_defaults(path):
     take("page_burst", "page_burst", int, 1, PAGE_BURST_MAX)
     take("wlan_slots", "wlan_slots", int, 1, 3)
     take("idle_after", "idle_after", float, 0.0, 3600.0)
+    if cfg.get("idle_source") in ("use", "activity"):
+        defaults["idle_source"] = cfg["idle_source"]
     take("syscount", "syscount", lambda v: None if str(v).lower() == "auto"
          else int(v), None, None)
 
@@ -2860,17 +2868,24 @@ def _coarse_changed(previous, current):
     return bool(_coarse_changes(previous, current))
 
 
-def _idle_tick(state, metrics, now, idle_after, wake=False):
+def _idle_tick(state, metrics, now, idle_after, wake=False,
+               track_activity=True):
     """Decide whether to send this pass. Returns (should_send, force_full).
 
     `wake` is raised by anything the panel sends back: those frames only
     arrive when a human presses a key or turns a page.
+
+    `track_activity` also lets material readings (load, temperature, disks)
+    postpone the blank. It is off by default: a NAS is never truly idle, so
+    disk temperatures drifting a few degrees used to wake the screen minutes
+    after it had gone dark and the panel's own timer never completed. The screen
+    is off - nobody is reading it - so data changes are the wrong signal for
+    "someone is here". Only input is.
     """
     state.setdefault("last_touch", now)
-    if _coarse_changed(state.get("coarse"), metrics):
-        state["coarse"] = metrics
-        wake = True
-    else:
+    if track_activity:
+        if _coarse_changed(state.get("coarse"), metrics):
+            wake = True
         state["coarse"] = metrics
     if wake:
         state["last_touch"] = now
@@ -3516,6 +3531,11 @@ def build_parser():
                              "nothing has changed materially for this long, so "
                              "the panel can switch its backlight off; 0 disables "
                              "(default %d)" % int(IDLE_AFTER_DEFAULT))
+    parser.add_argument("--idle-source", default="use",
+                        choices=("use", "activity"),
+                        help="what counts as activity for the idle timer: "
+                             "panel input only (default) or also material "
+                             "changes in load/temperature/disks")
     parser.add_argument("--idle-debug", action="store_true",
                         help="log why the idle timer was reset, pass by pass")
     parser.add_argument("--no-lean", dest="lean", action="store_false",

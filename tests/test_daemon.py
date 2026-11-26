@@ -2292,3 +2292,63 @@ class DirectionalChangeTest(unittest.TestCase):
         self.assertEqual(idle_at, 31)
         self.assertEqual(woke_after_idle, [],
                          "the load drop must not wake it: %r" % (woke_after_idle,))
+
+
+class InputOnlyIdleTest(unittest.TestCase):
+    """By default only panel input postpones the blank.
+
+    A NAS is never quiet: disk temperatures drift and that woke the screen
+    minutes after it had gone dark, so the panel's own timer never finished.
+    """
+
+    def _metrics(self, temp=33, cpu=10):
+        snapshot = proto.SystemSnapshot(timestamp=1000, cpu_usage=cpu,
+                                        cpu_temp=45, cpu_fan=900, mem_usage=60,
+                                        device_name="T", cpu_name="X",
+                                        os_name="U", serial="S")
+        snapshot.networks = [proto.WlanItem(0, 0, 0, 5_000_000,
+                                            (192, 168, 1, 2), "br0")]
+        snapshot.disks = [proto.DiskItem(0, 400, 200, temp, "disk1")]
+        return daemon._coarse_metrics(snapshot)
+
+    def test_default_source_is_panel_input(self):
+        self.assertEqual(daemon.build_parser().parse_args(["run"]).idle_source,
+                         "use")
+
+    def test_warming_disks_do_not_wake_it(self):
+        state = {}
+        cool = self._metrics(temp=33)
+        warm = self._metrics(temp=40)
+        daemon._idle_tick(state, cool, 0.0, 30.0, False, False)
+        daemon._idle_tick(state, cool, 40.0, 30.0, False, False)
+        self.assertTrue(state["idle"])
+        send, _ = daemon._idle_tick(state, warm, 120.0, 30.0, False, False)
+        self.assertFalse(send, "temperature drift must not wake a dark screen")
+
+    def test_a_button_still_wakes_it(self):
+        state = {}
+        metrics = self._metrics()
+        daemon._idle_tick(state, metrics, 0.0, 30.0, False, False)
+        daemon._idle_tick(state, metrics, 40.0, 30.0, False, False)
+        send, force_full = daemon._idle_tick(state, metrics, 41.0, 30.0,
+                                             True, False)
+        self.assertTrue(send)
+        self.assertTrue(force_full)
+
+    def test_activity_mode_still_available(self):
+        state = {}
+        cool = self._metrics(temp=33)
+        warm = self._metrics(temp=40)
+        daemon._idle_tick(state, cool, 0.0, 30.0, False, True)
+        daemon._idle_tick(state, cool, 40.0, 30.0, False, True)
+        send, _ = daemon._idle_tick(state, warm, 120.0, 30.0, False, True)
+        self.assertTrue(send, "activity mode keeps the old behaviour")
+
+    def test_config_file_can_pick_the_mode(self):
+        handle = tempfile.NamedTemporaryFile("w", suffix=".cfg", delete=False,
+                                             encoding="utf-8")
+        handle.write("idle_source=activity\n")
+        handle.close()
+        self.addCleanup(os.unlink, handle.name)
+        self.assertEqual(
+            daemon._config_defaults(handle.name)["idle_source"], "activity")

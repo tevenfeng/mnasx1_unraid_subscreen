@@ -20,6 +20,7 @@ function subsys_defaults(): array
         'every_slow' => '4',
         'every_static' => '12',
         'idle_after' => '30',
+        'idle_source' => 'use',
         'page_priority' => '1',
         'page_burst' => '4',
         'layout' => 'per-page',

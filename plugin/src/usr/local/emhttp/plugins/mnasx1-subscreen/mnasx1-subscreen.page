@@ -154,6 +154,13 @@ $labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'd
              step="10" value="<?=subsys_h($cfg['idle_after'])?>">
     </div>
     <div class="subsys-row">
+      <label for="idle_source">计时依据 / Counted from</label>
+      <select id="idle_source" name="idle_source">
+        <option value="use" <?=$cfg['idle_source'] === 'use' ? 'selected' : ''?>>面板操作 use</option>
+        <option value="activity" <?=$cfg['idle_source'] === 'activity' ? 'selected' : ''?>>操作或数值变化 activity</option>
+      </select>
+    </div>
+    <div class="subsys-row">
       <label>可见页优先 / Prioritise visible page</label>
       <input type="hidden" name="page_priority" value="0">
       <input type="checkbox" name="page_priority" value="1" <?=$cfg['page_priority'] === '1' ? 'checked' : ''?>>
@@ -169,14 +176,16 @@ $labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'd
     Time between packets. Below 1.0 s the panel builds a backlog, freezes and stops taking input.<br>
     可见页优先：切页后当前页的数据立刻补发（每帧最多借用上面 N 个包位），其余页只是更新变慢，不会白屏。调大数字请逐档验证面板不卡。<br>
     Visible-page priority: after a page switch the shown page gets its fresh values first, borrowing up to N extra slots per frame; other pages only refresh slower. Raise the number one step at a time and confirm the panel stays responsive.<br>
-    空闲熄屏：从最后一次按键/翻页，或最后一次"明显变化"（负载 ±20%、温度 ±3°C、风扇 ±10%、磁盘增删或用量 ±1%、网卡 up/down 或 IP 变化）
-    起算，超过这么多秒就完全停止发包，让面板自己的无数据超时关掉背光。网速抖动、1°C 漂移不会重置计时。
-    期间时钟会停住；按面板键或出现明显变化会立刻整帧唤醒。0 = 关闭。
+    空闲熄屏：默认只把**面板操作**（按键、翻页）当作"有人在用"。超过这么多秒没有操作就完全停止发包，
+    让面板自己的无数据超时关掉背光，之后要按键才会唤醒并整帧重绘。0 = 关闭。
     <br>
-    Idle blank: counted from the last key press / page turn or the last material change (load ±20 %,
-    temperature ±3 °C, fan ±10 %, a disk appearing or its usage ±1 %, link up/down or IP change).
-    After that many seconds the daemon stops sending entirely so the panel's own inactivity timer can
-    switch the backlight off. Rate wobble and 1 °C drift do not reset the clock. 0 disables it.
+    选「操作或数值变化」时，负载上升 ≥20 点、温度 ≥3°C、风扇 ≥10 点、磁盘增删/用量 ≥1GB、网卡条目增删也会推迟熄屏。
+    但 NAS 上温度本就会漂，这会让屏幕反复被自己唤醒、迟迟不熄，所以默认不启用。
+    <br>
+    Idle blank counts panel input only (keys, page turns) by default: after that many seconds without
+    input the daemon stops sending and lets the panel's own inactivity timer switch the backlight off;
+    a key press wakes it and redraws a full frame. 0 disables it. The "activity" option also postpones
+    the blank on material changes, which on a NAS tends to keep waking the screen by itself.
   </p>
 </div>
 
