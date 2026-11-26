@@ -2571,12 +2571,11 @@ def cmd_run(args):
                 if idle_after > 0:
                     wake = bool(state.pop("wake_requested", False))
                     metrics = _coarse_metrics(snapshot)
-                    if idle_debug:
-                        reasons = _coarse_changes(state.get("coarse"), metrics)
-                        if wake:
-                            reasons = ["panel event"] + reasons
-                        if reasons:
-                            _log("idle-debug: awake - %s" % ", ".join(reasons))
+                    wake_reasons = _coarse_changes(state.get("coarse"), metrics)
+                    if wake:
+                        wake_reasons = ["panel event"] + wake_reasons
+                    if idle_debug and wake_reasons:
+                        _log("idle-debug: awake - %s" % ", ".join(wake_reasons))
                     send, force_full = _idle_tick(
                         state, metrics, time.monotonic(), idle_after, wake)
                     if force_full:
@@ -2593,7 +2592,8 @@ def cmd_run(args):
                                             max(1.0, idle_after / 4.0)))
                         continue
                     if state.get("idle_logged"):
-                        _log("wake: sending again")
+                        _log("wake: sending again (%s)" % (
+                            ", ".join(wake_reasons) if wake_reasons else "change"))
                         state["idle_logged"] = False
                 try:
                     _write_frame(transport, packets, _run_pace(args),
@@ -2807,18 +2807,30 @@ def _moved(previous, current, threshold):
     return abs(current - previous) >= threshold
 
 
+def _rose(previous, current, threshold):
+    """A directional test for load and fans.
+
+    Only rises count. Going idle lowers our own CPU and fan load, and an
+    absolute-difference test read that as "something happened", which woke the
+    screen seconds after it had gone quiet.
+    """
+    if previous is None or current is None:
+        return previous != current
+    return current - previous >= threshold
+
+
 def _coarse_changes(previous, current):
     """Names of the fields that moved enough to count as real activity."""
     if previous is None:
         return ["first"]
     reasons = []
     for key in ("cpu", "mem", "igpu", "dgpu"):
-        if _moved(previous["usage"][key], current["usage"][key],
-                  COARSE_USAGE_POINTS):
+        if _rose(previous["usage"][key], current["usage"][key],
+                 COARSE_USAGE_POINTS):
             reasons.append("usage." + key)
     for key in ("cpu", "igpu", "dgpu"):
-        if _moved(previous["fans"][key], current["fans"][key],
-                  COARSE_FAN_POINTS):
+        if _rose(previous["fans"][key], current["fans"][key],
+                 COARSE_FAN_POINTS):
             reasons.append("fan." + key)
     if len(previous["temps"]) != len(current["temps"]):
         reasons.append("temps.count")

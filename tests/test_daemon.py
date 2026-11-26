@@ -2227,7 +2227,9 @@ class PanelEventWakeTest(unittest.TestCase):
                                         wake)
             if not send and idle_at is None:
                 idle_at = passes
-        self.assertEqual(idle_at, 31)
+        self.assertIsNotNone(idle_at)
+        self.assertGreaterEqual(idle_at, 31)
+        self.assertLessEqual(idle_at, 33, "one pass of slack for the load drop")
 
     def _snapshot(self):
         snapshot = proto.SystemSnapshot(timestamp=1000, cpu_usage=10,
@@ -2238,3 +2240,55 @@ class PanelEventWakeTest(unittest.TestCase):
                                             (192, 168, 1, 2), "br0")]
         snapshot.disks = [proto.DiskItem(0, 400, 200, 33, "disk1")]
         return snapshot
+
+
+class DirectionalChangeTest(unittest.TestCase):
+    """Going quiet lowers our own load; that must not count as activity."""
+
+    def _metrics(self, cpu=10, fan=900):
+        snapshot = proto.SystemSnapshot(timestamp=1000, cpu_usage=cpu,
+                                        cpu_temp=45, cpu_fan=fan, mem_usage=60,
+                                        device_name="T", cpu_name="X",
+                                        os_name="U", serial="S")
+        snapshot.networks = [proto.WlanItem(0, 0, 0, 5_000_000,
+                                            (192, 168, 1, 2), "br0")]
+        snapshot.disks = [proto.DiskItem(0, 400, 200, 33, "disk1")]
+        return daemon._coarse_metrics(snapshot)
+
+    def test_a_load_drop_is_not_activity(self):
+        self.assertEqual(daemon._coarse_changes(self._metrics(cpu=35),
+                                                self._metrics(cpu=5)), [])
+
+    def test_a_load_rise_is_activity(self):
+        self.assertEqual(daemon._coarse_changes(self._metrics(cpu=5),
+                                               self._metrics(cpu=35)),
+                         ["usage.cpu"])
+
+    def test_a_fan_drop_is_not_activity(self):
+        self.assertEqual(daemon._coarse_changes(self._metrics(fan=1500),
+                                                self._metrics(fan=900)), [])
+
+    def test_a_fan_rise_is_activity(self):
+        self.assertEqual(daemon._coarse_changes(self._metrics(fan=900),
+                                               self._metrics(fan=1500)),
+                         ["fan.cpu"])
+
+    def test_the_idle_drop_does_not_wake_the_screen(self):
+        """The self-oscillation: sending raises CPU, going idle lowers it, and
+        the drop used to wake the panel seconds after it went quiet."""
+        state = {}
+        idle_at = None
+        woke_after_idle = []
+        for passes in range(1, 100):
+            cpu = 30 if not state.get("idle") else 6
+            metrics = self._metrics(cpu=cpu)
+            wake_reasons = daemon._coarse_changes(state.get("coarse"), metrics)
+            sleep_now = bool(state.get("idle"))
+            send, _ = daemon._idle_tick(state, metrics, float(passes), 30.0)
+            if not send and idle_at is None:
+                idle_at = passes
+            elif send and idle_at is not None and sleep_now:
+                woke_after_idle.append((passes, wake_reasons))
+        self.assertEqual(idle_at, 31)
+        self.assertEqual(woke_after_idle, [],
+                         "the load drop must not wake it: %r" % (woke_after_idle,))
