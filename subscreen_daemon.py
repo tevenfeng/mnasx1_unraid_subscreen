@@ -2287,6 +2287,22 @@ def _hex(data):
     return " ".join("%02X" % byte for byte in data) or "-"
 
 
+def _feed(buffer, args, state):
+    """Decode complete frames out of `buffer`; return the remainder."""
+    frames, buffer = _extract_frames(buffer)
+    for frame in frames:
+        try:
+            info = parse_packet(frame)
+            if info is not None:
+                info["raw"] = frame
+                _handle_incoming(info, args, state)
+            else:
+                _log("panel: unparsable frame raw=%s" % _hex(frame))
+        except Exception as exc:  # noqa: BLE001 - reader must not die
+            _log("reader: event handling failed: %s" % exc)
+    return buffer
+
+
 def _reader_loop(transport, stop_event, args, state):
     """Read and decode panel events. Never sends anything."""
     buffer = b""
@@ -2302,17 +2318,7 @@ def _reader_loop(transport, stop_event, args, state):
         buffer += chunk
         if len(buffer) > 4096:
             buffer = buffer[-1024:]
-        frames, buffer = _extract_frames(buffer)
-        for frame in frames:
-            try:
-                info = parse_packet(frame)
-                if info is not None:
-                    info["raw"] = frame
-                    _handle_incoming(info, args, state)
-                else:
-                    _log("panel: unparsable frame raw=%s" % _hex(frame))
-            except Exception as exc:  # noqa: BLE001 - reader must not die
-                _log("reader: event handling failed: %s" % exc)
+        buffer = _feed(buffer, args, state)
 
 
 # ---------------------------------------------------------------------------
@@ -2594,9 +2600,12 @@ def cmd_run(args):
                                  "%.0fs, stopped sending so the panel can "
                                  "blank" % idle_after)
                             state["idle_logged"] = True
-                        stop_event.wait(min(IDLE_CHECK_SECONDS,
-                                            max(1.0, idle_after / 4.0)))
-                        continue
+                        # Escalate: hold the link without reads, then close
+                        # it and poll. Waking breaks out and reconnects, and
+                        # the first pass after a reconnect is a full frame.
+                        _run_deep_idle(transport, reader_stop, stop_event,
+                                       state, args)
+                        break
                     if state.get("idle_logged"):
                         _log("wake: sending again (%s)" % (
                             ", ".join(wake_reasons) if wake_reasons else "change"))
@@ -2622,6 +2631,48 @@ def cmd_run(args):
 
     _log("stopped")
     return 0
+
+
+def _run_deep_idle(transport, reader_stop, stop_event, state, args):
+    """Stay silent in two escalating stages, and report how we left them.
+
+    Stage 1 keeps the USB link open but stops reading: if the panel blanks
+    here, it was the reads that counted as activity.
+    Stage 2 closes the link entirely - the same state as a stopped daemon,
+    which is the only configuration verified to blank - and briefly reopens
+    every `idle_poll` seconds to look for buffered key presses.
+
+    Returns True when the panel produced input and the caller should
+    reconnect and redraw.
+    """
+    grace = max(0.0, float(getattr(args, "idle_grace", 300) or 0))
+    poll = max(10.0, float(getattr(args, "idle_poll", 60) or 60))
+
+    reader_stop.set()
+    if grace > 0:
+        _log("idle: link open, no reads (stage 1, %.0fs; keys are dead "
+             "until stage 2)" % grace)
+        if stop_event.wait(grace):
+            return False
+    transport.close()
+    _log("idle: link closed, polling every %.0fs for keys (stage 2)" % poll)
+    while not stop_event.is_set():
+        if stop_event.wait(poll):
+            return False
+        probe = UsbTransport()
+        try:
+            probe.open()
+        except (UsbError, OSError):
+            continue            # device unplugged; try again next cycle
+        try:
+            chunk = probe.read(64)
+            if chunk:
+                _feed(chunk, args, state)
+        finally:
+            probe.close()
+        if state.pop("wake_requested", False):
+            return True
+    return False
 
 
 def _reset_port(transport):
@@ -2720,6 +2771,8 @@ def _config_defaults(path):
     take("page_burst", "page_burst", int, 1, PAGE_BURST_MAX)
     take("wlan_slots", "wlan_slots", int, 1, 3)
     take("idle_after", "idle_after", float, 0.0, 3600.0)
+    take("idle_grace", "idle_grace", float, 0.0, 3600.0)
+    take("idle_poll", "idle_poll", float, 10.0, 600.0)
     if cfg.get("idle_source") in ("use", "activity"):
         defaults["idle_source"] = cfg["idle_source"]
     take("syscount", "syscount", lambda v: None if str(v).lower() == "auto"
@@ -3536,6 +3589,13 @@ def build_parser():
                         help="what counts as activity for the idle timer: "
                              "panel input only (default) or also material "
                              "changes in load/temperature/disks")
+    parser.add_argument("--idle-grace", type=float, default=300.0, metavar="SECONDS",
+                        help="after going idle, keep the USB link open this "
+                             "long without reading before closing it "
+                             "(default 300; 0 closes immediately)")
+    parser.add_argument("--idle-poll", type=float, default=60.0, metavar="SECONDS",
+                        help="while the link is closed, reopen it this often "
+                             "to look for buffered key presses (default 60)")
     parser.add_argument("--idle-debug", action="store_true",
                         help="log why the idle timer was reset, pass by pass")
     parser.add_argument("--no-lean", dest="lean", action="store_false",

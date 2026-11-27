@@ -21,6 +21,8 @@ function subsys_defaults(): array
         'every_static' => '12',
         'idle_after' => '30',
         'idle_source' => 'use',
+        'idle_grace' => '300',
+        'idle_poll' => '60',
         'page_priority' => '1',
         'page_burst' => '4',
         'layout' => 'per-page',

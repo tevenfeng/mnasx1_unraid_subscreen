@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import types
 import unittest
@@ -2352,3 +2353,83 @@ class InputOnlyIdleTest(unittest.TestCase):
         self.addCleanup(os.unlink, handle.name)
         self.assertEqual(
             daemon._config_defaults(handle.name)["idle_source"], "activity")
+
+
+class DeepIdleTest(unittest.TestCase):
+    """Silence must escalate: reads stop first, then the link closes."""
+
+    def _args(self, grace=300.0, poll=60.0):
+        return types.SimpleNamespace(idle_grace=grace, idle_poll=poll,
+                                    allow_hibernate=False)
+
+    def test_shutdown_during_stage1_keeps_the_link_to_the_finally_block(self):
+        transport = mock.Mock()
+        reader_stop = threading.Event()
+        stop_event = threading.Event()
+        stop_event.set()
+        with mock.patch.object(daemon, "_log"):
+            daemon._run_deep_idle(transport, reader_stop, stop_event, {},
+                                  self._args(grace=300))
+        self.assertTrue(reader_stop.is_set(), "the reader must be stopped")
+        transport.close.assert_not_called()
+
+    def test_zero_grace_closes_immediately_and_never_probes(self):
+        transport = mock.Mock()
+        stop_event = threading.Event()
+        stop_event.set()
+        with mock.patch.object(daemon, "_log"), \
+                mock.patch.object(daemon, "UsbTransport") as probe_cls:
+            daemon._run_deep_idle(transport, threading.Event(), stop_event,
+                                  {}, self._args(grace=0))
+        transport.close.assert_called()
+        probe_cls.assert_not_called()
+
+    def test_stage2_wakes_when_the_probe_sees_a_key(self):
+        transport = mock.Mock()
+        stop_event = threading.Event()
+        state = {}
+        probe = mock.Mock()
+
+        def fake_feed(chunk, args, state):
+            state["wake_requested"] = True
+
+        class Once:
+            count = 0
+
+        def fake_wait(timeout=None):
+            Once.count += 1
+            return Once.count > 1        # let exactly one poll happen
+
+        with mock.patch.object(daemon, "UsbTransport",
+                               return_value=probe), \
+                mock.patch.object(daemon, "_feed", side_effect=fake_feed), \
+                mock.patch.object(stop_event, "wait",
+                                  side_effect=fake_wait):
+            woke = daemon._run_deep_idle(transport, threading.Event(),
+                                        stop_event, state,
+                                        self._args(grace=0, poll=0.01))
+        self.assertTrue(woke, "input found while polling must wake it")
+        probe.read.assert_called()
+        probe.close.assert_called()
+
+    def test_stage2_keeps_sleeping_when_the_probe_finds_nothing(self):
+        transport = mock.Mock()
+        stop_event = threading.Event()
+        probe = mock.Mock()
+        probe.read.return_value = b""
+        probes = []
+
+        def fake_wait(timeout=None):
+            probes.append(1)
+            return len(probes) > 2     # two polls, then stop
+
+        with mock.patch.object(daemon, "UsbTransport",
+                               return_value=probe), \
+                mock.patch.object(daemon, "_log"), \
+                mock.patch.object(stop_event, "wait",
+                                  side_effect=fake_wait):
+            woke = daemon._run_deep_idle(transport, threading.Event(),
+                                        stop_event, {},
+                                        self._args(grace=0, poll=0.01))
+        self.assertFalse(woke)
+        self.assertEqual(probe.read.call_count, 2)

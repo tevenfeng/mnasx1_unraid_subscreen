@@ -80,6 +80,8 @@ function subsys_handle_post(): array
     $values['idle_after'] = subsys_clamp_int(subsys_post('idle_after'), 0, 3600, $defaults['idle_after']);
     $values['idle_source'] = subsys_pick(subsys_post('idle_source'),
         ['use', 'activity'], $defaults['idle_source']);
+    $values['idle_grace'] = subsys_clamp_int(subsys_post('idle_grace'), 0, 3600, $defaults['idle_grace']);
+    $values['idle_poll'] = subsys_clamp_int(subsys_post('idle_poll'), 10, 600, $defaults['idle_poll']);
     $values['page_priority'] = subsys_on_off('page_priority', $defaults['page_priority']);
     $values['page_burst'] = subsys_clamp_int(subsys_post('page_burst'), 1, 8, $defaults['page_burst']);
 

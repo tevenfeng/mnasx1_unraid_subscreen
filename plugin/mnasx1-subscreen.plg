@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "mnasx1-subscreen">
 <!ENTITY author    "tevenfeng">
-<!ENTITY version   "2026.11.26a">
+<!ENTITY version   "2026.11.27">
 <!ENTITY flash     "/boot/config/plugins/&name;">
 <!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
 <!ENTITY pkg       "&name;-&version;-x86_64-1.txz">
@@ -27,7 +27,7 @@
      would silently keep installing the previous build after an upgrade. -->
 <FILE Name="&flash;/&pkg;" Run="upgradepkg --install-new --reinstall">
 <URL>https://github.com/tevenfeng/mnasx1_unraid_subscreen/releases/download/&version;/&pkg;</URL>
-<SHA256>0c14df1e3b98ea3c5f5246e9f9930e48c201d2fea44b387ca85719cfb2fed17e</SHA256>
+<SHA256>2d2ae507a58088dbcbeca53d3458574ee327505398225d653db8c962e730c489</SHA256>
 </FILE>
 
 <!-- Runs on every boot, after the package is unpacked into RAM. -->

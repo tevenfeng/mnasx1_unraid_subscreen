@@ -154,6 +154,16 @@ $labels = ['cpu' => 'CPU', 'igpu' => '核显 iGPU', 'mem' => '内存 Memory', 'd
              step="10" value="<?=subsys_h($cfg['idle_after'])?>">
     </div>
     <div class="subsys-row">
+      <label for="idle_grace">熄屏宽限 / Link-open grace（秒）</label>
+      <input id="idle_grace" type="number" name="idle_grace" min="0" max="3600"
+             step="10" value="<?=subsys_h($cfg['idle_grace'])?>">
+    </div>
+    <div class="subsys-row">
+      <label for="idle_poll">熄屏轮询 / Key poll（秒）</label>
+      <input id="idle_poll" type="number" name="idle_poll" min="10" max="600"
+             step="10" value="<?=subsys_h($cfg['idle_poll'])?>">
+    </div>
+    <div class="subsys-row">
       <label for="idle_source">计时依据 / Counted from</label>
       <select id="idle_source" name="idle_source">
         <option value="use" <?=$cfg['idle_source'] === 'use' ? 'selected' : ''?>>面板操作 use</option>
