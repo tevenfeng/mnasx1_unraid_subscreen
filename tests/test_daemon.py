@@ -2433,3 +2433,67 @@ class DeepIdleTest(unittest.TestCase):
                                         self._args(grace=0, poll=0.01))
         self.assertFalse(woke)
         self.assertEqual(probe.read.call_count, 2)
+
+
+class DeepIdleBackoffTest(unittest.TestCase):
+    """A probe every 60 s is bus activity and resets the panel's blank timer -
+    the reason the previous release never went dark. The interval must grow
+    until it exceeds the firmware timeout."""
+
+    def _run_probes(self, probes):
+        """Drive stage 2 for `probes` empty polls; return the waits."""
+        waits = []
+
+        def fake_wait(timeout=None):
+            waits.append(timeout)
+            return len(waits) > probes
+
+        probe = mock.Mock()
+        probe.read.return_value = b""
+        args = types.SimpleNamespace(idle_grace=0, idle_poll=60,
+                                      allow_hibernate=False)
+        stop_event = threading.Event()
+        with mock.patch.object(daemon, "UsbTransport",
+                               return_value=probe), \
+                mock.patch.object(daemon, "_log"), \
+                mock.patch.object(stop_event, "wait",
+                                  side_effect=fake_wait):
+            daemon._run_deep_idle(mock.Mock(), threading.Event(),
+                                  stop_event, {}, args)
+        return waits
+
+    def test_interval_doubles_until_the_cap(self):
+        waits = self._run_probes(6)
+        self.assertEqual(waits[:6], [60.0, 120.0, 240.0, 480.0, 960.0, 960.0])
+
+    def test_a_small_configured_poll_still_backs_off(self):
+        waits = self._run_probes(5)
+        self.assertEqual(waits[0], 60.0)
+        self.assertEqual(waits[-1], 960.0)
+
+    def test_probe_reaching_a_key_wakes_before_backoff_grows(self):
+        state = {}
+        probe = mock.Mock()
+        probe.read.return_value = b"\xa5\x5a\x01\x04\x03\x10"
+
+        def fake_feed(chunk, args, state):
+            state["wake_requested"] = True
+
+        calls = []
+
+        def fake_wait(timeout=None):
+            calls.append(timeout)
+            return len(calls) > 1
+
+        args = types.SimpleNamespace(idle_grace=0, idle_poll=60,
+                                     allow_hibernate=False)
+        stop_event = threading.Event()
+        with mock.patch.object(daemon, "UsbTransport",
+                               return_value=probe), \
+                mock.patch.object(daemon, "_feed", side_effect=fake_feed), \
+                mock.patch.object(stop_event, "wait",
+                                  side_effect=fake_wait):
+            woke = daemon._run_deep_idle(mock.Mock(), threading.Event(),
+                                         stop_event, state, args)
+        self.assertTrue(woke)
+        self.assertEqual(calls, [60.0], "a key on the first probe wakes now")

@@ -2646,7 +2646,13 @@ def _run_deep_idle(transport, reader_stop, stop_event, state, args):
     reconnect and redraw.
     """
     grace = max(0.0, float(getattr(args, "idle_grace", 300) or 0))
-    poll = max(10.0, float(getattr(args, "idle_poll", 60) or 60))
+    first_poll = max(10.0, float(getattr(args, "idle_poll", 60) or 60))
+    # A probe is bus activity: claiming the interface and reading both count,
+    # and a probe every 60 s resets the panel's blank timer forever - measured
+    # as "never blanks". So the interval backs off until it is longer than
+    # the panel's own timeout, then holds. Keys buffer in the panel's endpoint
+    # FIFO, so a press made while dark is still caught by the next probe.
+    poll_cap = max(first_poll, 960.0)
 
     reader_stop.set()
     if grace > 0:
@@ -2655,7 +2661,9 @@ def _run_deep_idle(transport, reader_stop, stop_event, state, args):
         if stop_event.wait(grace):
             return False
     transport.close()
-    _log("idle: link closed, polling every %.0fs for keys (stage 2)" % poll)
+    _log("idle: link closed, key probes back off %.0fs -> %.0fs"
+         % (first_poll, poll_cap))
+    poll = first_poll
     while not stop_event.is_set():
         if stop_event.wait(poll):
             return False
@@ -2672,6 +2680,11 @@ def _run_deep_idle(transport, reader_stop, stop_event, state, args):
             probe.close()
         if state.pop("wake_requested", False):
             return True
+        # Nothing pressed: the longer nobody touches the panel, the quieter
+        # we get, until the interval exceeds the firmware's blank timeout.
+        if poll < poll_cap:
+            poll = min(poll * 2, poll_cap)
+            _log("idle: no keys; next probe in %.0fs" % poll)
     return False
 
 
